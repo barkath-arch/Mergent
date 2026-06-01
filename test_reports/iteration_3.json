@@ -1,0 +1,36 @@
+{
+  "summary": "MERGENT Phase 0 backend — iteration 3 re-validation after fixes. 29/29 PASS (17 baseline + 12 scenarios) in 375.66s. Both iteration_2 findings re-verified as resolved: (A) ContextCompression compressed=True branch is now REACHABLE via public API — TestContextCompressionKeywords hard-asserts compressed_flag is True and observed token_estimate=2847 vs new threshold=2000 (compression.py L15). RequirementParserAgent still extracts >=2 of the 3 keywords (multi-tenant / GDPR / audit-log). (B) WS channel cleanup race fixed — TestWSChannelCleanup PASS: 5 sequential runs x 4 WS subscribers = 20 sockets all closed cleanly; ws.total_channels returns to baseline after the WS finally-block cleanup (orchestrator.py now does mark_finished BEFORE broadcast and does NOT call cleanup itself, letting the WS handler do it on disconnect — verified in source L106-L114 and L146-L152). All four hard gates hold: HG1 TextileFlow ERP top-3 in 5/5 canonical runs with top-3 SET pairwise overlap >=2; HG2 WS streams isolated/monotonic/no cross-talk across concurrent runs; HG3 provider failover coverage retained via /app/backend/scripts/failover_check.py (NOT re-executed this iteration, explicitly noted); HG4 trace completeness — WS unique (agent,status) order mirrors trace.steps; all required fields present. Smoke: /api/health 200, /api/admin/providers/health 200, /api/admin/orchestration/runs 200, /api/admin/orchestration/_debug 200, /api/openapi.json 200, /api/admin/solutions/reindex 503 (queue_unavailable — same intermittent celery broker behavior documented in iteration_2, structured error, NOT a regression; pytest run captured a 202 window). Ranking p95 = 9154 ms across 10 canonical runs (well under 30s gate). No regressions. No new findings.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/admin/solutions/reindex", "issue": "Intermittently returns 503 queue_unavailable when celery broker connection is transiently down. Structured error response with retry_after_s. Pre-existing & documented in iteration_2 — NOT a regression. The corresponding pytest TestAdmin::test_reindex_enqueue accepts both 202 and 503 by design."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_scenarios.py",
+    "/app/test_reports/pytest/iteration_3_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "FIX VERIFIED (A): compression.py L15 COMPRESS_TOKEN_THRESHOLD=2000 — canonical SCENARIO #7 (~6000 char text + 10 candidates) yields full-context token_estimate=2847, triggering compressed=True branch end-to-end. Compression now reachable through the public /api/match surface.",
+    "FIX VERIFIED (B): orchestrator.py — run_completed (L106-L114) and run_failed (L146-L152) both now do ws.mark_finished(run_id) BEFORE ws.broadcast(...) and the orchestrator does NOT call ws.cleanup() itself. This eliminates the race where a subscriber would receive the terminal event, disconnect, and try to cleanup an already-cleaned channel. The WS finally-block in server.py now owns cleanup. ws.total_channels returns to baseline after subscribers detach (verified by TestWSChannelCleanup).",
+    "TestContextCompressionKeywords now HARD-asserts compressed_flag is True (no longer a soft check) — confirmed by reading test_scenarios.py L354+ and by the captured stdout 'ContextCompression: compressed=True token_estimate=2847'.",
+    "HG1 (TextileFlow consistency): PASS — 5/5 canonical runs include TextileFlow ERP in top-3; pairwise top-3 SET overlap >=2 across all 10 pairs.",
+    "HG2 (WS isolation/order): PASS — no cross-run event leakage; per-run started_at monotonic; unique (agent,status) pairs in event stream match trace.steps order exactly.",
+    "HG3 (provider failover): COVERAGE PRESERVED via /app/backend/scripts/failover_check.py — not re-executed in this iteration to avoid burning provider quota; behavior unchanged from iteration_2 since no code in services/ai_provider.py was touched.",
+    "HG4 (trace completeness): PASS — every step carries started_at, ended_at, execution_ms, status, provider_used, token_usage, ws_emitted_at (verified by TestTraceIntegrity and the baseline test_trace_has_all_agents_with_structured_fields).",
+    "Latency: Ranking p95=9154 ms across 10 runs in this iteration (distribution [7265, 9154, 6408, 6729, 10815, 6000, 9149, 7373, 6634, 6775] ms). Comfortably under the 30s gate. Slight uptick vs iteration_2 (8430 ms) but well within spec.",
+    "MongoDB _id: not leaked in any sampled response (admin runs list, trace, match endpoints all return clean JSON).",
+    "Smoke endpoints all 200 except reindex (503 acceptable per spec)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (29/29)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "N/A — Phase 0 has no auth (confirmed via /app/memory/test_credentials.md).",
+  "seed_data_creation": "No new seed. Existing 10 solutions remain (vector_index_size=10 via /api/health).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 0 backend is in good shape. Both iteration_2 minor findings are resolved. Test suite is stable at 29/29 in ~6 minutes. Key files: /app/backend/tests/backend_test.py + /app/backend/tests/test_scenarios.py. JUnit XML at /app/test_reports/pytest/iteration_3_results.xml. Public base URL via $REACT_APP_BACKEND_URL in /app/frontend/.env. TextileFlow solution_id 1923bfa7-ee64-4d7d-9930-9337420329d4. Canonical SCENARIO #5 query lives in test_scenarios.CANONICAL. ContextCompression threshold is now 2000 tokens — token estimates above ~2400 trigger compressed=True. Provider failover is NOT re-run by the test suite; if a future iteration mutates services/ai_provider.py, also re-run /app/backend/scripts/failover_check.py.",
+  "rca_of_the_issue": "N/A — no issue found in iteration 3. Both prior issues (compression unreachability + WS channel race) have been correctly addressed at the documented source locations and confirmed by hard assertions in the test suite."
+}

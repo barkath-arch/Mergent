@@ -12,7 +12,7 @@ from db import get_db
 from services.ai_provider import get_ai_provider
 
 
-COMPRESS_TOKEN_THRESHOLD = 6000
+COMPRESS_TOKEN_THRESHOLD = 2000
 
 
 def _estimate_tokens(text: str) -> int:

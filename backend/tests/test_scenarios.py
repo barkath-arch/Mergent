@@ -387,13 +387,17 @@ class TestContextCompressionKeywords:
                 if payload.get("compressed") is True:
                     compressed_flag = True
                 token_estimate = payload.get("compression_token_estimate")
-        # NOTE: compressed=True is gated by COMPRESS_TOKEN_THRESHOLD=6000 tokens
-        # while the public API caps requirement_text at 8000 chars (~2000 tokens).
-        # With 10 candidates the full context tops out around ~4800 tokens, so the
-        # compression branch is currently UNREACHABLE through the public surface.
-        # We still verify the agent ran and reported a token estimate.
+        # COMPRESS_TOKEN_THRESHOLD is tuned (compression.py L15) so that a
+        # full-spec ~6000+ char requirement (such as the SCENARIO #7 input)
+        # reliably engages the compression path. The user's hard gate
+        # requires compression to be visibly active in the trace.
         print(f"\nContextCompression: compressed={compressed_flag} token_estimate={token_estimate}")
         assert token_estimate is not None and token_estimate > 0, "compression_token_estimate missing"
+        assert compressed_flag is True, (
+            f"compressed=True branch did NOT engage for a {len(text[:8000])}-char "
+            f"requirement (token_estimate={token_estimate}). The COMPRESS_TOKEN_THRESHOLD "
+            f"is too high relative to realistic input sizes."
+        )
 
         # Parser persisted requirements include >=2 of keywords
         parser_steps = [s for s in steps if _matches_agent(s.get("agent"), "Parser") and s.get("status") == "completed"]

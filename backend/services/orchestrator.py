@@ -103,6 +103,7 @@ class MergentOrchestrator:
                     }
                 },
             ))
+            await ws.mark_finished(run_id)
             await ws.broadcast(run_id, {
                 "type": "run_completed",
                 "run_id": run_id,
@@ -111,7 +112,6 @@ class MergentOrchestrator:
                 "result_count": len(ranked),
                 "ts": _now_iso(),
             })
-            await ws.mark_finished(run_id)
             logger.info(
                 "run_completed",
                 extra={
@@ -143,13 +143,13 @@ class MergentOrchestrator:
                     }
                 },
             ))
+            await ws.mark_finished(run_id)
             await ws.broadcast(run_id, {
                 "type": "run_failed",
                 "run_id": run_id,
                 "error": err,
                 "ts": _now_iso(),
             })
-            await ws.mark_finished(run_id)
             logger.exception("run_failed", extra={"run_id": run_id, "error": err})
             return {"status": "failed", "error": err}
 

@@ -18,6 +18,7 @@ def _detect_budget(text: str) -> Dict[str, Any]:
     if not matches:
         return {"detected": False}
     amount_raw, suffix = matches[0]
+    amount: float = 0.0
     try:
         amount = float(amount_raw.replace(",", ""))
     except ValueError:

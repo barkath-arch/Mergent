@@ -1,0 +1,35 @@
+{
+  "summary": "MERGENT Phase 0 backend fully tested. 17/17 pytest tests PASS (health, openapi, validation, pipeline, WS, admin, TextileFlow 3x). All 3 verification scripts PASS: consistency_check 5/5, concurrency_check 5/5 parallel runs, failover_check anthropic->openai fallback. Real LLM (openai/gpt-4o-mini via emergentintegrations) + local BAAI/bge-base-en-v1.5 768-dim embeddings. Pipeline completes in ~11-14s. Vector index size = 10. WebSocket per-run channels stream 6 agent_step events + run_completed. Trace structure complete with execution_ms, provider_used, token_usage, ws_emitted_at, retry_count on every completed step.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/admin/solutions/reindex", "issue": "Returns 503 because Celery worker is not running (broker conn refused). Endpoint logic is correct — gracefully returns 503 with error. Spec accepts 'success or 503'."},
+      {"endpoint": "litellm cleanup", "issue": "RuntimeWarning 'coroutine close_litellm_async_clients was never awaited' on script exit. Cosmetic only; does not affect runtime."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/backend/scripts/consistency_check.py",
+    "/app/backend/scripts/concurrency_check.py",
+    "/app/backend/scripts/failover_check.py"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Trace step structure is excellent — every completed step includes all required structured fields (execution_ms, provider_used, token_usage, retry_count, ws_emitted_at, fallback_event).",
+    "WebSocket per-run channel scoping verified — events for a run_id only emitted on its own channel.",
+    "POST /api/match latency well within budget (<500ms; observed ~tens of ms before 202).",
+    "TextileFlow ERP deterministically appears at rank 1 across 5/5 consistency runs and 3 pytest canonical runs. Embedding + ranking pipeline working as designed.",
+    "Provider failover correctly emits structured fallback_event on the failed agent step (anthropic -> openai verified).",
+    "Validation matrix complete: empty/whitespace/<5/>8000 all return 400; non-string returns 422 (FastAPI/Pydantic default)."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (17/17 pytest + 3/3 scripts)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "N/A — no auth in Phase 0",
+  "seed_data_creation": "10 solutions seeded by scripts/seed_phase0.py (vector_index_size=10 confirmed via /api/health).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend at http://localhost:8001. POST body schema is {requirement_text: str} (NOT 'text'). Pipeline ~11-14s per run. Celery worker NOT running in supervisor — /api/admin/solutions/reindex returns 503 (acceptable per spec). Trace 'started' status steps don't have execution_ms (only 'completed' steps do); tests must filter by status. Agent names in trace include 'Agent' suffix (IntakeAgent, RequirementParserAgent, EmbeddingAgent, SemanticSearchAgent, ContextCompressionAgent, RankingAgent).",
+  "rca_of_the_issue": "Original test_trace_has_all_agents_with_structured_fields test was failing for two reasons: (1) it compared full agent names ('Intake' vs 'IntakeAgent') instead of using the substring helper _agents_seen_match already defined in the file; (2) it asserted execution_ms on ALL steps including 'started' events which legitimately lack execution_ms (only emitted on 'completed'). Fixed test to use the substring helper and to validate the full structured-field set (including provider_used, token_usage, ws_emitted_at, retry_count) only on completed steps. This is a test bug — the backend's trace contract is correct."
+}

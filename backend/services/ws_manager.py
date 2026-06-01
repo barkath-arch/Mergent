@@ -105,6 +105,22 @@ class WSManager:
             if ch and ch.finished and not ch.connections:
                 self._channels.pop(run_id, None)
 
+    def channel_counts(self) -> Dict[str, Any]:
+        """Introspection snapshot for tests / debugging."""
+        per_run = {
+            rid: {
+                "connections": len(ch.connections),
+                "buffered_events": len(ch.buffer),
+                "finished": ch.finished,
+            }
+            for rid, ch in self._channels.items()
+        }
+        return {
+            "total_channels": len(self._channels),
+            "total_connections": sum(v["connections"] for v in per_run.values()),
+            "per_run": per_run,
+        }
+
 
 _singleton: WSManager | None = None
 

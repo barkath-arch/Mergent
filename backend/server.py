@@ -174,6 +174,7 @@ async def ws_match(websocket: WebSocket, run_id: str) -> None:
         logger.warning("ws_loop_error", extra={"error": str(exc), "run_id": run_id})
     finally:
         await ws_manager.disconnect(run_id, websocket)
+        await ws_manager.cleanup(run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +198,22 @@ async def admin_reindex() -> Dict[str, Any]:
     except Exception as exc:
         logger.error("reindex_enqueue_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=503, detail={"error": "queue_unavailable", "retry_after_s": 5})
+
+
+@api_router.get("/admin/orchestration/_debug")
+async def admin_orchestration_debug() -> Dict[str, Any]:
+    """Introspection endpoint for tests — exposes WS channel counts and
+    provider cache state so memory-leak / channel-cleanup assertions can be
+    made externally. Phase 0: unauthenticated. TODO(Phase 1): protect.
+    """
+    ws = get_ws_manager()
+    provider = get_ai_provider()
+    return {
+        "ws": ws.channel_counts(),
+        "provider_chain": provider.provider_chain,
+        "vector_index_size": get_vector_index().size,
+        "ts": _now_iso(),
+    }
 
 
 @api_router.get("/admin/providers/health")

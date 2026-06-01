@@ -1,0 +1,43 @@
+{
+  "summary": "MERGENT Phase 0 backend — formal testing agent iteration 2. 17/17 baseline pytest tests PASS (iteration 1 regression set). 12/12 NEW scenario tests PASS covering: unknown-run 404, /api/admin/orchestration/_debug shape, WS late-subscriber replay+run_already_finished, invalid+valid payload isolation (5 bad/5 valid interleaved), 5-way concurrent stability with run_id isolation, WS ordering & cross-run isolation, TextileFlow ERP top-3 consistency across 5 sequential canonical runs (top-3 SET overlap >=2/3 across all 10 pairs), ranking determinism (top-5 SET stable across repeats), trace integrity (WS unique (agent,status) pairs == trace.steps pairs in order), ContextCompression keyword path (agent runs cleanly), Ranking p95 latency = 8.43s (distribution [5989, 6476, 6183, 7926, 8430, 6761, 6633, 7099, 7858, 8728] ms, target <30s) , WS channel cleanup returns to baseline after disconnect. ONE FINDING: ContextCompression compressed=True branch is unreachable via the public API because COMPRESS_TOKEN_THRESHOLD=6000 tokens vs the 8000-char (~2000 token) input cap — code path otherwise correct.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/admin/solutions/reindex", "issue": "Returns 503 'queue_unavailable' when celery broker connection fails (Connection refused observed during one window). Acceptable per spec; endpoint logic correct."},
+      {"endpoint": "ContextCompressionAgent", "issue": "compressed=True branch is unreachable through the public surface: COMPRESS_TOKEN_THRESHOLD=6000 tokens (compression.py L15) but POST /api/match caps requirement_text at 8000 chars (~2000 tokens). With 10 seeded candidates, full estimated token count tops out around ~4800 tokens. Recommend either lowering the threshold (e.g. 4000 tokens) OR raising the requirement_text cap OR documenting that compression only triggers once the solution catalog grows."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_scenarios.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/scenarios_results.xml",
+    "/app/test_reports/pytest/scenarios_heavy.xml",
+    "/app/test_reports/pytest/scenarios_p95.xml"
+  ],
+  "action_items": [
+    "Decide on ContextCompression threshold vs input cap mismatch — current code never triggers compression for any payload that can pass /api/match validation. Either lower COMPRESS_TOKEN_THRESHOLD or raise requirement_text 8000-char limit, otherwise this Phase 0 capability is effectively dead code."
+  ],
+  "critical_code_review_comments": [
+    "WSManager.cleanup is correctly called on disconnect and channels DO drop back to baseline after subscribers detach (scenario #10 verified end-to-end: 5 runs x 4 sockets = 20 connections opened+closed, ws.total_channels returned to baseline).",
+    "WebSocket isolation: events for run A never appear on run B's channel (verified by collecting events from 5 concurrent runs and 2 sequential WS-subscribed runs — every event with a run_id carried its OWN run_id).",
+    "Trace and WS event ordering are consistent: unique (agent, status) pair sequence on WS matches trace.steps order exactly; started_at is monotonically non-decreasing on the persisted trace.",
+    "Ranking is deterministic: top-5 SETs identical across repeated canonical runs (temperature=0 honored).",
+    "TextileFlow ERP (1923bfa7-...) appears in top 3 in 5/5 canonical runs; top-3 SET pairwise overlap >= 2 across all 10 pairs.",
+    "Validation contract is strong: empty/whitespace/<5/>8000 all map to structured 400 errors; non-string/non-JSON map to 422; concurrent valid runs are unaffected by interleaved bad requests.",
+    "Latency well within spec: Ranking p95 = 8.43s across 10 runs, far below the 30s gate; full pipeline e2e runs ~7-13s observed.",
+    "DESIGN ISSUE (non-blocking): ContextCompression threshold is unreachable through validated input — see backend_issues.minor[1] and action_items.",
+    "Not re-verified in this iteration (already covered by main-agent self-tests, see iteration_1.json + scripts/): SCENARIO #3 provider failover (failover_check.py), SCENARIO #4 Celery NX-lock duplicate prevention (celery_resilience_check.py), SCENARIO #9 Redis bounce in-flight resilience. The corresponding scripts continue to live under /app/backend/scripts/."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_scenarios.py (new — 12 scenario tests)"
+  ],
+  "success_rate": {"backend": "100% (29/29: 17 baseline + 12 scenarios)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "N/A — Phase 0 has no auth (confirmed via /app/memory/test_credentials.md).",
+  "seed_data_creation": "Existing 10 solutions seeded by scripts/seed_phase0.py (vector_index_size=10 confirmed via /api/health and /api/admin/orchestration/_debug).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend public URL: https://find-deploy-rank.preview.emergentagent.com. Two test files in /app/backend/tests/: backend_test.py (17 baseline) and test_scenarios.py (12 scenarios). All required agents are present in trace as IntakeAgent / RequirementParserAgent / EmbeddingAgent / SemanticSearchAgent / ContextCompressionAgent / RankingAgent. POST body schema: {requirement_text: str}. Canonical textile query is the longer SCENARIO #5 string (see test_scenarios.CANONICAL). TextileFlow solution_id = 1923bfa7-ee64-4d7d-9930-9337420329d4. Ranking p95 observed ~8.4s — leave headroom. ContextCompression compressed=True branch CANNOT be hit through public API given current 8000-char cap vs 6000-token threshold (see action_items).",
+  "rca_of_the_issue": "ContextCompression compressed=True unreachable: compression.py uses COMPRESS_TOKEN_THRESHOLD=6000 tokens against full context (user_text + parsed_requirement + concatenated candidate {title, tagline, description, tech_stack, tags}). With 10 seeded candidates the candidate-side contribution is ~2800 tokens; the input cap of 8000 chars (~2000 tokens) means total never exceeds ~4800 tokens. Mitigation: lower threshold to ~4000 tokens OR raise requirement_text cap OR grow the catalog so candidate-side context dominates. This is NOT a runtime bug — the gate is correctly evaluated and the agent always emits a structured step with compressed flag and token estimate — but it makes the compression capability untestable end-to-end with the current public contract."
+}

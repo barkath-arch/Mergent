@@ -135,6 +135,7 @@ def embed_solution(self, solution_id: str, enqueued_ts: Optional[float] = None) 
 async def _async_reindex_all() -> Dict[str, Any]:
     client = AsyncIOMotorClient(os.environ["MONGO_URL"], serverSelectionTimeoutMS=5000)
     db = client[os.environ["DB_NAME"]]
+    ids: List[str] = []
     try:
         ids = [d["_id"] async for d in db.solutions.find({}, {"_id": 1})]
     finally:

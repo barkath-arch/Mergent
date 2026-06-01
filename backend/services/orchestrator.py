@@ -32,13 +32,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+from agents import intake as _intake
+from agents import parser as _parser
+from agents import embedding as _embedding
+from agents import search as _search
+from agents import compression as _compression
+from agents import ranking as _ranking
+
+
+# Static agent registry — explicit imports avoid dynamic __import__() and make
+# pipeline membership trivially auditable.
 PIPELINE: List[Dict[str, Any]] = [
-    {"agent": "IntakeAgent", "import": "agents.intake"},
-    {"agent": "RequirementParserAgent", "import": "agents.parser"},
-    {"agent": "EmbeddingAgent", "import": "agents.embedding"},
-    {"agent": "SemanticSearchAgent", "import": "agents.search"},
-    {"agent": "ContextCompressionAgent", "import": "agents.compression"},
-    {"agent": "RankingAgent", "import": "agents.ranking"},
+    {"agent": "IntakeAgent", "run": _intake.run},
+    {"agent": "RequirementParserAgent", "run": _parser.run},
+    {"agent": "EmbeddingAgent", "run": _embedding.run},
+    {"agent": "SemanticSearchAgent", "run": _search.run},
+    {"agent": "ContextCompressionAgent", "run": _compression.run},
+    {"agent": "RankingAgent", "run": _ranking.run},
 ]
 
 
@@ -56,10 +66,9 @@ class MergentOrchestrator:
         try:
             for spec in PIPELINE:
                 agent_name: str = spec["agent"]
-                module = __import__(spec["import"], fromlist=["run"])
                 step_record = await self._run_agent(
                     agent_name=agent_name,
-                    agent_fn=module.run,
+                    agent_fn=spec["run"],
                     ctx=ctx,
                     run_id=run_id,
                     ws=ws,

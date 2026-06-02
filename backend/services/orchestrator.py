@@ -14,7 +14,6 @@ Concurrency model:
 """
 from __future__ import annotations
 
-import asyncio
 import time
 import traceback
 from datetime import datetime, timezone

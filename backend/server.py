@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,7 +31,6 @@ load_dotenv(ROOT_DIR / ".env")
 
 from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
 
 from db import close_db, ensure_indexes, get_db, with_retry  # noqa: E402
 from models import MatchAcceptedResponse, MatchRequest  # noqa: E402

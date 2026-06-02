@@ -50,18 +50,23 @@ class WSManager:
     async def connect(self, run_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
         ch = await self._get_channel(run_id)
+        # Hold the channel lock for the WHOLE flow:
+        #   1) snapshot the buffer
+        #   2) flush replay to the new subscriber
+        #   3) add this socket to the live connection set
+        # This guarantees per-stream monotonic ordering: any concurrent
+        # broadcast will queue behind this lock and only reach the new
+        # subscriber AFTER the replay is fully delivered.
         async with ch.lock:
-            ch.connections.add(websocket)
-            # Replay buffered events so latecomers don't miss the early steps.
             replay = list(ch.buffer)
             finished = ch.finished
-        for evt in replay:
-            try:
-                await websocket.send_text(json.dumps(evt))
-            except Exception:
-                # Connection dropped during replay — clean up.
-                await self.disconnect(run_id, websocket)
-                return
+            for evt in replay:
+                try:
+                    await websocket.send_text(json.dumps(evt))
+                except Exception:
+                    # Connection dropped during replay — abort and exit.
+                    return
+            ch.connections.add(websocket)
         if finished:
             # Inform late subscriber that run is done; they may close on their side.
             try:

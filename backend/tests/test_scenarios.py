@@ -22,7 +22,6 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import Counter
 
 import pytest
 import requests
@@ -443,13 +442,13 @@ class TestWSChannelCleanup:
         baseline = debug()["ws"]["total_channels"]
 
         # 5 sequential runs, each with 4 subscribers
-        for i in range(5):
+        for _i in range(5):
             r = _post_match(CANONICAL)
             run_id = r.json()["run_id"]
             url = f"{WS_BASE}/api/ws/match/{run_id}"
 
-            async def subscribe():
-                async with websockets.connect(url, open_timeout=10, ping_interval=None) as ws:
+            async def subscribe(ws_url=url):
+                async with websockets.connect(ws_url, open_timeout=10, ping_interval=None) as ws:
                     end = time.time() + 180
                     while time.time() < end:
                         try:

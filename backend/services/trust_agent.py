@@ -124,6 +124,9 @@ async def _volume_tenure_component(db, builder_id: str) -> float:
     joined = prof.get("joined_at")
     months = 0.0
     if isinstance(joined, datetime):
+        # Normalize naive datetimes (legacy seeded docs) to UTC to compare with aware _now().
+        if joined.tzinfo is None:
+            joined = joined.replace(tzinfo=timezone.utc)
         months = max(0.0, (_now() - joined).days / 30.0)
     # log-scale: 1 tx → 30, 10 → 60, 100 → 90; tenure: 1m → 30, 12m → 80
     tx_score = _clamp(20 + 25 * math.log1p(n_tx))

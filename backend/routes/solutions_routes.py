@@ -195,3 +195,45 @@ async def my_solutions(user: Dict[str, Any] = Depends(require_role("builder", "a
         db.solutions.find({"builder_id": user["id"]}).sort("created_at", -1).limit(50)
     ]
     return {"items": items, "count": len(items)}
+
+
+# ---------------------------------------------------------------------------
+# Forking stub (Phase 9). Returns 501 but validates the schema and lineage
+# so the contract is testable + frontend can wire a "Fork" button safely.
+# ---------------------------------------------------------------------------
+class ForkIn(BaseModel):
+    title: Optional[str] = Field(None, min_length=3, max_length=120)
+    change_summary: Optional[str] = Field(None, max_length=500)
+    royalty_split_pct: int = Field(0, ge=0, le=50)
+
+
+@router.post("/solutions/{solution_id}/fork", status_code=501)
+async def fork_solution(
+    solution_id: str, body: ForkIn,
+    user: Dict[str, Any] = Depends(require_role("builder", "admin")),
+) -> Dict[str, Any]:
+    """Phase 9 stub. The full forking UX (lineage tracking, royalty split,
+    deferred revenue accounting) is deferred. We still validate parent
+    existence + lineage primitives so the contract is testable today.
+    """
+    db = get_db()
+    parent = await db.solutions.find_one({"_id": solution_id})
+    if not parent:
+        raise HTTPException(404, detail={"error": "solution_not_found"})
+    # Surface the validated lineage we WOULD assign so the UX can preview it.
+    raise HTTPException(
+        status_code=501,
+        detail={
+            "error": "not_implemented_until_phase_9",
+            "would_fork": {
+                "parent_id": parent["_id"],
+                "lineage_root_id": parent.get("lineage_root_id") or parent["_id"],
+                "fork_depth": int(parent.get("fork_depth", 0)) + 1,
+                "version": 1,
+                "title": body.title or f"{parent.get('title','Solution')} (fork)",
+                "change_summary": body.change_summary or "Initial fork",
+                "royalty_split_pct": body.royalty_split_pct,
+                "by_user_id": user["id"],
+            },
+        },
+    )

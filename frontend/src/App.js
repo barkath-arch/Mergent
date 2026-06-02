@@ -14,6 +14,12 @@ import { TransactionList, TransactionDetail } from "./pages/Transactions";
 import { DeploymentList, DeploymentDetail } from "./pages/Deployments";
 import Settings from "./pages/Settings";
 import RequirementForm from "./pages/RequirementForm";
+import Saved from "./pages/Saved";
+import NotificationSettings from "./pages/NotificationSettings";
+import {
+  BuilderShell, BuilderOverview, BuilderSolutions,
+  BuilderSales, BuilderEarnings, BuilderStats,
+} from "./pages/Builder";
 import "./App.css";
 
 function Protected({ children }) {
@@ -45,7 +51,19 @@ function App() {
             <Route path="/deployments" element={<DeploymentList />} />
             <Route path="/deployments/:id" element={<DeploymentDetail />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/settings/notifications" element={<NotificationSettings />} />
             <Route path="/requirements/new" element={<RequirementForm />} />
+            <Route path="/saved" element={<Saved />} />
+
+            {/* Builder Hub (Phase 6) */}
+            <Route path="/builder" element={<BuilderShell />}>
+              <Route index element={<BuilderOverview />} />
+              <Route path="solutions" element={<BuilderSolutions />} />
+              <Route path="sales" element={<BuilderSales />} />
+              <Route path="earnings" element={<BuilderEarnings />} />
+              <Route path="stats" element={<BuilderStats />} />
+            </Route>
+
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

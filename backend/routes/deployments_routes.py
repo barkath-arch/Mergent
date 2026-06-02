@@ -74,6 +74,30 @@ async def _set_state(deployment_id: str, state: str, version: Optional[str] = No
     await get_v1_ws().broadcast("deployments", deployment_id, {
         "type": "state", "state": state, "ts": _now().isoformat(),
     })
+    # Notify owner on milestone states (Phase 7).
+    if state in ("live", "failed", "rolling_back"):
+        try:
+            from services.notifications import notify
+            d = await db.deployments.find_one({"_id": deployment_id})
+            if d:
+                await notify(
+                    d.get("owner_id"),
+                    type="deployment_status",
+                    category="deployments",
+                    title=f"Deployment {state.replace('_',' ')}",
+                    body=f"{d.get('solution_title','Your deployment')} is now {state}.",
+                    link=f"/deployments/{deployment_id}",
+                    email_template="deployment_status",
+                    email_context={
+                        "deployment_id": deployment_id,
+                        "solution_title": d.get("solution_title"),
+                        "state": state,
+                        "version": d.get("current_version"),
+                    },
+                    debounce_key=f"dep:{deployment_id}:{state}",
+                )
+        except Exception as e:
+            print(f"[mergent.dep] notify_failed: {e}")
 
 
 async def _run_deployment(deployment_id: str, version: str) -> None:

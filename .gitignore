@@ -84,3 +84,9 @@ android-sdk/
 # Expo
 mobile/.expo/
 mobile/.metro-cache/
+.env
+.env.*
+*.env
+credentials.json
+*.key
+.credentials

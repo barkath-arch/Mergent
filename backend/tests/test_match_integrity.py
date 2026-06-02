@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -108,3 +108,38 @@ class TestMatchIntegrity:
         )
         assert r.status_code in (200, 201), f"expected ok got {r.status_code} body={r.text}"
         assert r.json().get("transaction_id")
+
+
+class TestRankingPromptIntegrity:
+    """Phase 6 invariant: trust_score must NOT bleed into the RankingAgent prompt.
+
+    The RankingAgent ranks purely on parsed-requirement <-> candidate-feature
+    fit. If trust_score (a builder-level reputation metric) were injected into
+    the prompt, the ranking model would over-weight popular builders and the
+    5/5 textile invariant would collapse on noisy inputs.
+
+    Static check on `_build_candidate_block` in agents/ranking.py — no
+    `trust_score` field, no reference in the system prompt template.
+    """
+
+    def test_ranking_prompt_has_no_trust_score_field(self):
+        path = Path(__file__).resolve().parents[1] / "agents" / "ranking.py"
+        src = path.read_text()
+        # Must NOT appear inside the system prompt OR the candidate-block builder.
+        assert "trust_score" not in src.lower(), (
+            "trust_score must not leak into the RankingAgent (would bias rankings)"
+        )
+
+    def test_compression_prompt_has_no_trust_score(self):
+        path = Path(__file__).resolve().parents[1] / "agents" / "compression.py"
+        src = path.read_text()
+        assert "trust_score" not in src.lower(), (
+            "trust_score must not leak into the ContextCompressionAgent payload"
+        )
+
+    def test_search_payload_has_no_trust_score(self):
+        path = Path(__file__).resolve().parents[1] / "agents" / "search.py"
+        src = path.read_text()
+        assert "trust_score" not in src.lower(), (
+            "trust_score must not appear in semantic search candidate metadata"
+        )

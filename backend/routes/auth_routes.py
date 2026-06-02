@@ -13,7 +13,6 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
-from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from auth import (
@@ -34,8 +33,13 @@ from auth import (
     verify_password,
 )
 from db import get_db
+from services.rate_limit import (
+    forgot_limit as _forgot_limit,
+    limiter,
+    login_limit as _login_limit,
+    register_limit as _register_limit,
+)
 
-limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
@@ -95,7 +99,7 @@ def _public_user(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------- Routes ----------------------
-@router.post("/register", status_code=201)
+@router.post("/register", status_code=201, dependencies=[Depends(_register_limit())])
 async def register(request: Request, response: Response, body: RegisterIn) -> Dict[str, Any]:
     db = get_db()
     email = body.email.lower().strip()
@@ -130,13 +134,21 @@ async def register(request: Request, response: Response, body: RegisterIn) -> Di
             "purchases_count": 0, "spend_usd": 0.0, "joined_at": now,
         })
 
-    # Email verification token (logged to console; no SMTP wired in preview).
+    # Email verification token (sent via Resend, falls back to console log).
     verify_token = new_secure_token()
     await db.email_verification_tokens.insert_one({
         "_id": verify_token, "user_id": user_id,
         "expires_at": now + timedelta(hours=24), "used": False,
     })
-    print(f"[mergent.auth] verify_email user={email} link=/auth/verify?token={verify_token}")
+    try:
+        from services.email import send_email
+        await send_email(
+            to=email, template_name="email_verify",
+            context={"name": body.name.strip(), "token": verify_token},
+            user_id=user_id, category="system",
+        )
+    except Exception as e:
+        print(f"[mergent.auth] verify_email_fallback user={email} link=/auth/verify?token={verify_token} err={e}")
 
     access = create_access_token(user_id, email, body.role)
     refresh, jti = create_refresh_token(user_id)
@@ -145,7 +157,7 @@ async def register(request: Request, response: Response, body: RegisterIn) -> Di
     return {"user": _public_user(doc), "access_token": access, "token_type": "bearer"}
 
 
-@router.post("/login")
+@router.post("/login", dependencies=[Depends(_login_limit())])
 async def login(request: Request, response: Response, body: LoginIn) -> Dict[str, Any]:
     db = get_db()
     email = body.email.lower().strip()
@@ -221,7 +233,7 @@ async def verify_email(body: VerifyIn) -> Dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/forgot-password")
+@router.post("/forgot-password", dependencies=[Depends(_forgot_limit())])
 async def forgot(request: Request, body: ForgotIn) -> Dict[str, Any]:
     db = get_db()
     email = body.email.lower().strip()
@@ -233,8 +245,15 @@ async def forgot(request: Request, body: ForgotIn) -> Dict[str, Any]:
             "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
             "used": False,
         })
-        # SIMULATED: real flow would email this. We console-log for preview.
-        print(f"[mergent.auth] password_reset user={email} link=/auth/reset?token={token}")
+        try:
+            from services.email import send_email
+            await send_email(
+                to=email, template_name="password_reset",
+                context={"email": email, "token": token},
+                user_id=user["_id"], category="system",
+            )
+        except Exception as e:
+            print(f"[mergent.auth] password_reset_fallback user={email} link=/auth/reset?token={token} err={e}")
     # Always 200 to avoid email enumeration.
     return {"ok": True}
 

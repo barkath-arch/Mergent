@@ -357,6 +357,17 @@ app.include_router(_messaging_router)
 app.include_router(_tx_router)
 app.include_router(_dep_router)
 
+# Phase 6 + 7 routers — builder hub, notifications, audit, saved items.
+from routes.builder_routes import router as _builder_router  # noqa: E402
+from routes.notifications_routes import router as _notif_router  # noqa: E402
+from routes.audit_routes import router as _audit_router  # noqa: E402
+from routes.saved_items_routes import router as _saved_router  # noqa: E402
+
+app.include_router(_builder_router)
+app.include_router(_notif_router)
+app.include_router(_audit_router)
+app.include_router(_saved_router)
+
 # Register V1 WebSocket routes (defined as closures with the live app instance)
 _register_messaging_ws(app)
 _register_dep_ws(app)

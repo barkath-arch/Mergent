@@ -2,10 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Store, Sparkles, MessageSquare, Receipt, Rocket,
-  Settings, LogOut, Search, Bell, User2, Plus,
+  Settings, LogOut, Search, User2, Plus, Bookmark, Hammer,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import api, { WS_BASE, getAccessToken } from "../lib/api";
+import NotificationCenter from "./NotificationCenter";
 
 function NavItem({ to, icon: Icon, label, badge }) {
   return (
@@ -21,6 +22,7 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
   const [unread, setUnread] = useState(0);
+  const isBuilder = user?.role === "builder" || user?.role === "admin";
 
   useEffect(() => {
     if (!user) return;
@@ -38,7 +40,6 @@ export default function Layout() {
         } catch {}
       };
     } catch {}
-    // Initial fetch
     api.get("/messaging/unread-count").then(r => !cancelled && setUnread(r.data.total_unread || 0)).catch(() => {});
     return () => { cancelled = true; try { ws?.close(); } catch {} };
   }, [user]);
@@ -59,7 +60,17 @@ export default function Layout() {
           <NavItem to="/messages" icon={MessageSquare} label="Messages" badge={unread > 0 ? unread : null} />
           <NavItem to="/transactions" icon={Receipt} label="Transactions" />
           <NavItem to="/deployments" icon={Rocket} label="Deployments" />
+          <NavItem to="/saved" icon={Bookmark} label="Saved" />
         </div>
+
+        {isBuilder ? (
+          <>
+            <div className="nav-label">Builder</div>
+            <div className="nav-group">
+              <NavItem to="/builder" icon={Hammer} label="Builder Hub" />
+            </div>
+          </>
+        ) : null}
 
         <div className="nav-label">Account</div>
         <div className="nav-group">
@@ -93,12 +104,7 @@ export default function Layout() {
           <Link to="/requirements/new" className="btn btn-secondary" data-testid="topbar-post-requirement-btn">
             <Plus size={14} /> Post requirement
           </Link>
-          <button className="btn-ghost" style={{ position: "relative", padding: 8, borderRadius: 10 }} title="Notifications" data-testid="topbar-bell-btn">
-            <Bell size={16} />
-            {unread > 0 ? (
-              <span style={{ position: "absolute", top: 4, right: 4, width: 8, height: 8, borderRadius: 4, background: "var(--rose)" }} />
-            ) : null}
-          </button>
+          <NotificationCenter />
           <div className="avatar" title={user?.email} data-testid="topbar-avatar">{(user?.name || "?").slice(0, 1).toUpperCase()}</div>
         </div>
 

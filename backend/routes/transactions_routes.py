@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 
 from auth import get_current_user, require_role
 from db import get_db
+from services.notifications import notify
+from services.trust_agent import persist_trust
 
 router = APIRouter(prefix="/api", tags=["transactions"])
 
@@ -234,7 +236,37 @@ async def advance_tx(tx_id: str, body: AdvanceIn, user: Dict[str, Any] = Depends
         {"$set": update,
          "$push": {"state_history": {"state": body.next_state, "at": now, "by": user["id"], "note": body.note}}},
     )
-    return _serialize_tx(await db.transactions.find_one({"_id": tx_id}))
+
+    # ---------- Notifications + Trust hook (Phase 6 + 7) ----------
+    fresh_tx = await db.transactions.find_one({"_id": tx_id})
+    other_id = fresh_tx["buyer_id"] if user["id"] != fresh_tx["buyer_id"] else fresh_tx["builder_id"]
+    try:
+        await notify(
+            other_id,
+            type="transaction_state_change",
+            category="transactions",
+            title=f"Purchase {body.next_state.replace('_', ' ')}",
+            body=f"{fresh_tx.get('solution_title','Your transaction')} moved to {body.next_state.replace('_',' ')}.",
+            link=f"/transactions/{tx_id}",
+            email_template="transaction_state_change",
+            email_context={
+                "transaction_id": tx_id,
+                "solution_title": fresh_tx.get("solution_title"),
+                "amount_usd": fresh_tx.get("amount_usd", 0),
+                "next_state": body.next_state,
+                "counterparty": (fresh_tx.get("buyer_name") if other_id == fresh_tx["builder_id"] else fresh_tx.get("builder_name")),
+            },
+            debounce_key=f"tx:{tx_id}:{body.next_state}",
+        )
+    except Exception as e:
+        print(f"[mergent.tx] notify_failed: {e}")
+    # Recompute trust on released (event-driven, non-blocking guarded).
+    if body.next_state == "released":
+        try:
+            await persist_trust(fresh_tx["builder_id"])
+        except Exception as e:
+            print(f"[mergent.tx] trust_recompute_failed: {e}")
+    return _serialize_tx(fresh_tx)
 
 
 @router.get("/transactions/me")
@@ -295,6 +327,31 @@ async def post_review(tx_id: str, body: ReviewIn, user: Dict[str, Any] = Depends
         {"_id": tx["builder_id"]}, {"$set": {"rating": round(avg, 2), "review_count": n}}
     )
     await db.transactions.update_one({"_id": tx_id}, {"$set": {"status": "reviewed", "updated_at": now}})
+    # Notify builder + trust recompute (Phase 6 + 7).
+    try:
+        await notify(
+            tx["builder_id"],
+            type="review_received",
+            category="reviews",
+            title=f"{int(body.rating)}-star review on {tx.get('solution_title','your solution')}",
+            body=body.comment.strip()[:280],
+            link=f"/solutions/{tx['solution_id']}",
+            email_template="review_received",
+            email_context={
+                "buyer_name": user.get("name"),
+                "rating": int(body.rating),
+                "comment": body.comment.strip(),
+                "solution_id": tx["solution_id"],
+                "solution_title": tx.get("solution_title"),
+            },
+            debounce_key=f"review:{rid}",
+        )
+    except Exception as e:
+        print(f"[mergent.review] notify_failed: {e}")
+    try:
+        await persist_trust(tx["builder_id"])
+    except Exception as e:
+        print(f"[mergent.review] trust_recompute_failed: {e}")
     return {**review, "id": rid}
 
 

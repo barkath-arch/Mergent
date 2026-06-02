@@ -1,7 +1,36 @@
-import React from "react";
+import React, { useState } from "react";
 import { Link } from "react-router-dom";
+import { Bookmark, BookmarkCheck } from "lucide-react";
+import api from "../lib/api";
+import { toast } from "sonner";
 
-export function SolutionCard({ s, rank }) {
+export function SolutionCard({ s, rank, initialSaved = false, onSavedChange = null }) {
+  const [saved, setSaved] = useState(initialSaved);
+  const [busy, setBusy] = useState(false);
+
+  async function toggleSave(e) {
+    e.preventDefault(); e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    try {
+      if (saved) {
+        await api.delete(`/me/saved/${s.id}`);
+        setSaved(false);
+        onSavedChange?.(s.id, false);
+        toast.success("Removed from saved");
+      } else {
+        await api.post("/me/saved", { solution_id: s.id });
+        setSaved(true);
+        onSavedChange?.(s.id, true);
+        toast.success("Saved");
+      }
+    } catch (err) {
+      toast.error(err?.response?.data?.detail?.error || "Failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Link to={`/solutions/${s.id}`} className="card fade-in result-card" data-testid={`solution-card-${s.id}`}>
       <div className="row gap-3">
@@ -10,6 +39,17 @@ export function SolutionCard({ s, rank }) {
           <div className="h3" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} data-testid={`solution-title-${s.id}`}>{s.title}</div>
           <div className="dim" style={{ fontSize: 12 }}>{s.builder_name}</div>
         </div>
+        <button
+          type="button"
+          className="btn-ghost"
+          onClick={toggleSave}
+          title={saved ? "Remove from saved" : "Save"}
+          aria-label={saved ? "Unsave" : "Save"}
+          style={{ padding: 6, borderRadius: 8 }}
+          data-testid={`solution-save-btn-${s.id}`}
+        >
+          {saved ? <BookmarkCheck size={14} color="var(--accent, #c4b5fd)" /> : <Bookmark size={14} />}
+        </button>
         <span className="chip chip-muted">{s.category}</span>
       </div>
       <p className="body" style={{ marginTop: 4, color: "var(--text-muted)" }}>{s.tagline}</p>

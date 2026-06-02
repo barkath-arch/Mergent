@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 from celery import Celery  # noqa: E402
+from celery.schedules import crontab as _crontab  # noqa: E402
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -40,4 +41,11 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_default_queue="mergent",
     result_expires=3600,
+    # Phase 6: nightly trust recompute @ 03:00 UTC.
+    beat_schedule={
+        "trust-recompute-nightly": {
+            "task": "tasks.recompute_trust_all",
+            "schedule": _crontab(hour=3, minute=0),
+        },
+    },
 )

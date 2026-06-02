@@ -162,6 +162,18 @@ def reindex_all_solutions() -> Dict[str, Any]:
     return _run_async(_async_reindex_all())
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 — Trust & Quality Agent sweep
+# ---------------------------------------------------------------------------
+@shared_task(name="tasks.recompute_trust_all")
+def recompute_trust_all() -> Dict[str, Any]:
+    """Nightly sweep — recomputes trust_score for every builder.
+    Triggered by celery beat (see celery_app.beat_schedule)."""
+    from services.trust_agent import recompute_all
+
+    return _run_async(recompute_all())
+
+
 def try_enqueue_embed(solution_id: str) -> Dict[str, Any]:
     """Acquire Redis NX lock and enqueue embed_solution. Returns status dict.
 

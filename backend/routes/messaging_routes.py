@@ -124,9 +124,27 @@ async def _store_message(db, conv_id: str, sender_id: str, text: str, participan
     )
     ws = get_v1_ws()
     payload = {"type": "new_message", "conversation_id": conv_id, "message": {**msg, "id": mid}}
+    sender = await db.users.find_one({"_id": sender_id}) or {}
+    sender_name = sender.get("name") or "Someone"
     for p in participants:
         await ws.broadcast("conversations", p, payload)
         await ws.broadcast("conversations", p, {"type": "unread_count", "total_unread": await _unread_for(db, p)})
+        if p != sender_id:
+            # Email + in-app notification with 5-minute debounce per conversation.
+            try:
+                from services.notifications import notify
+                await notify(
+                    p, type="new_message", category="messages",
+                    title=f"New message from {sender_name}",
+                    body=text[:280],
+                    link=f"/messages?c={conv_id}",
+                    email_template="new_message",
+                    email_context={"sender_name": sender_name, "message_preview": text,
+                                    "conversation_id": conv_id},
+                    debounce_key=f"msg:{conv_id}",
+                )
+            except Exception as e:
+                print(f"[mergent.msg] notify_failed: {e}")
     return {**msg, "id": mid}
 
 

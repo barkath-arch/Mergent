@@ -331,10 +331,52 @@ def _serialize_run(doc: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 app.include_router(api_router)
 
+# V1 routers (auth, profiles, solutions, marketplace, requirements, messaging, transactions, deployments)
+from routes.auth_routes import router as _auth_router, limiter as _auth_limiter  # noqa: E402
+from routes.profiles_routes import router as _profiles_router  # noqa: E402
+from routes.solutions_routes import router as _solutions_router  # noqa: E402
+from routes.marketplace_routes import router as _marketplace_router  # noqa: E402
+from routes.requirements_routes import router as _requirements_router  # noqa: E402
+from routes.messaging_routes import router as _messaging_router, register_ws as _register_messaging_ws  # noqa: E402
+from routes.transactions_routes import router as _tx_router  # noqa: E402
+from routes.deployments_routes import router as _dep_router, register_ws as _register_dep_ws  # noqa: E402
+from slowapi.errors import RateLimitExceeded  # noqa: E402
+from slowapi import _rate_limit_exceeded_handler  # noqa: E402
+from fastapi.responses import FileResponse  # noqa: E402
+from storage import get_file_path  # noqa: E402
+
+app.state.limiter = _auth_limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.include_router(_auth_router)
+app.include_router(_profiles_router)
+app.include_router(_solutions_router)
+app.include_router(_marketplace_router)
+app.include_router(_requirements_router)
+app.include_router(_messaging_router)
+app.include_router(_tx_router)
+app.include_router(_dep_router)
+
+# Register V1 WebSocket routes (defined as closures with the live app instance)
+_register_messaging_ws(app)
+_register_dep_ws(app)
+
+
+@app.get("/api/files/{filename}")
+async def serve_file(filename: str):
+    p = get_file_path(filename)
+    if not p:
+        raise HTTPException(404, detail={"error": "file_not_found"})
+    return FileResponse(str(p))
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    # Phase 1: cover both the public preview host AND the internal canonical host
+    # (ingress 307s preview→internal.preview); a wildcard would break credentialed CORS.
+    allow_origin_regex=r"https?://(localhost(:\d+)?|.*\.emergentagent\.com)",
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )

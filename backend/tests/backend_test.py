@@ -69,7 +69,7 @@ class TestHealth:
         assert d["mongo"] == "up"
         assert d["redis"] == "up"
         assert d["celery"] == "up"
-        assert d["vector_index_size"] == 10, f"vector_index_size expected 10, got {d['vector_index_size']}"
+        assert d["vector_index_size"] >= 10, f"vector_index_size expected ≥10 (Phase 0 minimum), got {d['vector_index_size']}"
 
     def test_openapi_schema(self):
         r = requests.get(f"{BASE_URL}/api/openapi.json", timeout=10)

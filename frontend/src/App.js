@@ -1,53 +1,56 @@
-import { useEffect } from "react";
-import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
+import React from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { Toaster } from "sonner";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import Layout from "./components/Layout";
+import Discover from "./pages/Discover";
+import { Login, Register, Forgot } from "./pages/Auth";
+import Marketplace from "./pages/Marketplace";
+import SolutionDetail from "./pages/SolutionDetail";
+import BuilderDetail from "./pages/BuilderDetail";
+import AIMatch from "./pages/AIMatch";
+import Messages from "./pages/Messages";
+import { TransactionList, TransactionDetail } from "./pages/Transactions";
+import { DeploymentList, DeploymentDetail } from "./pages/Deployments";
+import Settings from "./pages/Settings";
+import RequirementForm from "./pages/RequirementForm";
+import "./App.css";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
-
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
-
-  useEffect(() => {
-    helloWorldApi();
-  }, []);
-
-  return (
-    <div>
-      <header className="App-header">
-        <a
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
+function Protected({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", color: "var(--text-muted)" }}>Loading…</div>;
+  if (!user) return <Navigate to="/auth/login" replace />;
+  return children;
+}
 
 function App() {
   return (
-    <div className="App">
-      <BrowserRouter>
+    <BrowserRouter>
+      <AuthProvider>
+        <Toaster theme="dark" position="top-right" richColors closeButton />
         <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
+          <Route path="/auth/login" element={<Login />} />
+          <Route path="/auth/register" element={<Register />} />
+          <Route path="/auth/forgot" element={<Forgot />} />
+
+          <Route element={<Protected><Layout /></Protected>}>
+            <Route path="/" element={<Discover />} />
+            <Route path="/marketplace" element={<Marketplace />} />
+            <Route path="/solutions/:id" element={<SolutionDetail />} />
+            <Route path="/builders/:id" element={<BuilderDetail />} />
+            <Route path="/ai-match" element={<AIMatch />} />
+            <Route path="/messages" element={<Messages />} />
+            <Route path="/transactions" element={<TransactionList />} />
+            <Route path="/transactions/:id" element={<TransactionDetail />} />
+            <Route path="/deployments" element={<DeploymentList />} />
+            <Route path="/deployments/:id" element={<DeploymentDetail />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="/requirements/new" element={<RequirementForm />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
-      </BrowserRouter>
-    </div>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }
 

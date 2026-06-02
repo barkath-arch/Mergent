@@ -1,30 +1,21 @@
-import { Text, View, StyleSheet, Image } from "react-native";
-
-const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+import { useEffect } from 'react';
+import { useRouter, useSegments } from 'expo-router';
+import { useAuth } from '../src/auth';
+import { Loader } from '../src/components/UI';
 
 export default function Index() {
-  console.log(EXPO_PUBLIC_BACKEND_URL, "EXPO_PUBLIC_BACKEND_URL");
+  const { user, loading } = useAuth();
+  const router = useRouter();
+  const segments = useSegments();
 
-  return (
-    <View style={styles.container}>
-      <Image
-        source={require("../assets/images/app-image.png")}
-        style={styles.image}
-      />
-    </View>
-  );
+  useEffect(() => {
+    if (loading) return;
+    if (!user) {
+      router.replace('/(auth)/login' as any);
+    } else {
+      router.replace('/(tabs)' as any);
+    }
+  }, [user, loading]);
+
+  return <Loader />;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#0c0c0c",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  image: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "contain",
-  },
-});

@@ -1,16 +1,14 @@
-"""ContextCompressionAgent — summarises candidate descriptions if context grows large.
+"""ContextCompressionAgent — conditional compression of candidate descriptions.
 
-Trigger: estimated_tokens(parsed_requirement + concatenated candidate texts) > 6000.
-When triggered, replaces each candidate's `description` with a short summary so
-that the RankingAgent prompt fits inside an economical token budget.
+Phase AGENTS Step 1: subclass of `BaseAgent`; LLM call (when triggered) routed
+through `self._llm(json_mode=True)`.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from agents.base import BaseAgent
 from db import get_db
-from services.ai_provider import get_ai_provider
-
 
 COMPRESS_TOKEN_THRESHOLD = 2000
 
@@ -19,7 +17,9 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _build_full_context_text(candidates: List[Dict[str, Any]], parsed: Dict[str, Any], user_text: str) -> str:
+def _build_full_context_text(
+    candidates: List[Dict[str, Any]], parsed: Dict[str, Any], user_text: str
+) -> str:
     parts: List[str] = []
     parts.append(user_text)
     parts.append(repr(parsed))
@@ -40,62 +40,68 @@ _COMPRESS_SYSTEM = (
 )
 
 
-async def run(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    candidate_ids: List[str] = ctx.get("candidate_ids", []) or []
-    if not candidate_ids:
-        return {"compressed": False, "candidates": [], "compression_token_estimate": 0}
+class ContextCompressionAgent(BaseAgent):
+    agent_name = "ContextCompressionAgent"
+    agent_version = "1.0.0"
 
-    db = get_db()
-    docs = [d async for d in db.solutions.find(
-        {"_id": {"$in": candidate_ids}},
-        {"embedding": 0},
-    )]
-    # Re-order to match candidate_ids order.
-    by_id = {d["_id"]: d for d in docs}
-    candidates = [by_id[sid] for sid in candidate_ids if sid in by_id]
+    async def run(self, input: Dict[str, Any]) -> Dict[str, Any]:  # noqa: A002
+        candidate_ids: List[str] = input.get("candidate_ids", []) or []
+        if not candidate_ids:
+            return {"compressed": False, "candidates": [], "compression_token_estimate": 0}
 
-    parsed = ctx.get("parsed_requirement", {}) or {}
-    user_text = ctx.get("normalized_text", "") or ctx.get("requirement_text", "")
-    full_text = _build_full_context_text(candidates, parsed, user_text)
-    token_estimate = _estimate_tokens(full_text)
+        db = get_db()
+        docs = [d async for d in db.solutions.find(
+            {"_id": {"$in": candidate_ids}},
+            {"embedding": 0},
+        )]
+        by_id = {d["_id"]: d for d in docs}
+        candidates = [by_id[sid] for sid in candidate_ids if sid in by_id]
 
-    if token_estimate <= COMPRESS_TOKEN_THRESHOLD:
+        parsed = input.get("parsed_requirement", {}) or {}
+        user_text = input.get("normalized_text", "") or input.get("requirement_text", "")
+        full_text = _build_full_context_text(candidates, parsed, user_text)
+        token_estimate = _estimate_tokens(full_text)
+
+        if token_estimate <= COMPRESS_TOKEN_THRESHOLD:
+            return {
+                "compressed": False,
+                "candidates": candidates,
+                "compression_token_estimate": token_estimate,
+            }
+
+        payload = [
+            {
+                "id": c["_id"],
+                "title": c.get("title", ""),
+                "description": c.get("description", ""),
+                "tech_stack": c.get("tech_stack", []),
+            }
+            for c in candidates
+        ]
+        user_msg = (
+            f"Compress these candidate solutions. Input JSON list:\n{payload}\n"
+            "Reply with: {\"compressed\": [{\"id\": ..., \"summary\": ...}]}"
+        )
+        parsed_resp, chat_result = await self._llm(
+            messages=[
+                {"role": "system", "content": _COMPRESS_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.0,
+            json_mode=True,
+            max_tokens=1200,
+        )
+        summaries = {item["id"]: item["summary"] for item in parsed_resp.get("compressed", []) if "id" in item}
+        for c in candidates:
+            if c["_id"] in summaries:
+                c["description"] = summaries[c["_id"]]
         return {
-            "compressed": False,
+            "compressed": True,
             "candidates": candidates,
             "compression_token_estimate": token_estimate,
+            "_chat_result": chat_result,
         }
 
-    # Compress.
-    provider = get_ai_provider()
-    payload = [
-        {
-            "id": c["_id"],
-            "title": c.get("title", ""),
-            "description": c.get("description", ""),
-            "tech_stack": c.get("tech_stack", []),
-        }
-        for c in candidates
-    ]
-    user_msg = (
-        f"Compress these candidate solutions. Input JSON list:\n{payload}\n"
-        "Reply with: {\"compressed\": [{\"id\": ..., \"summary\": ...}]}"
-    )
-    parsed_resp, chat_result = await provider.chat_json(
-        messages=[
-            {"role": "system", "content": _COMPRESS_SYSTEM},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.0,
-        max_tokens=1200,
-    )
-    summaries = {item["id"]: item["summary"] for item in parsed_resp.get("compressed", []) if "id" in item}
-    for c in candidates:
-        if c["_id"] in summaries:
-            c["description"] = summaries[c["_id"]]
-    return {
-        "compressed": True,
-        "candidates": candidates,
-        "compression_token_estimate": token_estimate,
-        "_chat_result": chat_result,
-    }
+
+async def run(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    return await ContextCompressionAgent().execute(ctx, run_id=ctx.get("run_id"))

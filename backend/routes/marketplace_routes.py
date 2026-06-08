@@ -93,7 +93,7 @@ async def overview() -> Dict[str, Any]:
     # 24h activity counters
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     new_solutions_24h = await db.solutions.count_documents({"created_at": {"$gte": since}})
-    new_runs_24h = await db.orchestration_runs.count_documents({"created_at": {"$gte": since.isoformat()}})
+    new_runs_24h = await db.match_runs.count_documents({"created_at": {"$gte": since.isoformat()}})
     new_requirements_24h = await db.requirements.count_documents({"created_at": {"$gte": since}})
 
     return {

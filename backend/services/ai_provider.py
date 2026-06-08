@@ -8,8 +8,16 @@ uses) and route requests through the Emergent integration proxy when the API key
 is the Emergent universal key (`sk-emergent-...`). This gives us OpenAI / Anthropic
 / Gemini access with one credential.
 
+Phase AGENTS Step 1 additions:
+  - `groq` provider (opt-in via `AI_PROVIDER_CHAIN`; uses direct Groq API when
+    `GROQ_API_KEY` is set, otherwise attempts via the Emergent proxy)
+  - per-call write to `ai_usage_logs` Mongo collection (provider, model,
+    `agent_name`, tokens in/out, latency, estimated cost, success/error)
+  - `chat()` and `chat_json()` and `embed()` all accept an optional `agent_name`
+    kwarg used solely for logging — no behavioural change.
+
 Concurrency: this module is async-only. The class is stateless besides a few
-caches (provider health, embedding cache) protected by asyncio.Lock.
+caches (provider health, embedding cache) protected by `asyncio.Lock`.
 """
 from __future__ import annotations
 
@@ -19,6 +27,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import litellm
@@ -30,29 +39,36 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Provider catalogue — kept minimal and explicit. Each entry maps to a
-# litellm-compatible model string when calling the Emergent proxy.
+# Provider catalogue.
 # ---------------------------------------------------------------------------
 PROVIDER_DEFAULT_CHAT_MODEL: Dict[str, str] = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-sonnet-4-5-20250929",
     "gemini": "gemini-2.5-flash",
+    "groq": "llama-3.3-70b-versatile",
 }
 
-# JSON-mode capable models (used by RequirementParser and Ranking).
-# OpenAI supports response_format={"type":"json_object"} natively. Anthropic and
-# Gemini are coaxed via prompt + parsing.
-_JSON_MODE_NATIVE = {"openai"}
+# OpenAI supports response_format={"type":"json_object"} natively.
+_JSON_MODE_NATIVE = {"openai", "groq"}
+
+# Rough $/1k tokens used by the cost estimator. Numbers come from each
+# provider's public pricing as of 2026. Used only for observability; not billed.
+COST_PER_1K_TOKENS: Dict[str, Dict[str, float]] = {
+    "openai:gpt-4o-mini":                 {"input": 0.00015, "output": 0.00060},
+    "anthropic:claude-sonnet-4-5-20250929": {"input": 0.003,   "output": 0.015},
+    "gemini:gemini-2.5-flash":             {"input": 0.000075, "output": 0.0003},
+    "groq:llama-3.3-70b-versatile":        {"input": 0.00059, "output": 0.00079},
+}
 
 
 # ---------------------------------------------------------------------------
-# Public dataclasses returned by the service.
+# Public dataclasses
 # ---------------------------------------------------------------------------
 @dataclass
 class ChatResult:
     text: str
-    provider_used: str  # "openai:gpt-4o-mini" etc.
-    token_usage: Dict[str, int]  # {"prompt":..,"completion":..,"total":..}
+    provider_used: str
+    token_usage: Dict[str, int]
     latency_ms: int
     retry_count: int = 0
     fallback_event: Optional[Dict[str, Any]] = None
@@ -61,7 +77,7 @@ class ChatResult:
 @dataclass
 class EmbedResult:
     vectors: List[List[float]]
-    provider_used: str  # "openai:text-embedding-3-large"
+    provider_used: str
     token_usage: Dict[str, int]
     latency_ms: int
     retry_count: int = 0
@@ -70,7 +86,7 @@ class EmbedResult:
 
 @dataclass
 class ProviderHealth:
-    last_call_status: str = "unknown"  # "ok" | "error" | "unknown"
+    last_call_status: str = "unknown"
     last_latency_ms: int = 0
     last_error: Optional[str] = None
     last_ts: float = 0.0
@@ -86,13 +102,15 @@ class AIProviderService:
         self.api_key = os.environ["EMERGENT_LLM_KEY"]
         self.api_base = get_integration_proxy_url() + "/llm"
 
+        # Optional direct keys (groq is the only one wired today).
+        self.groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
+
         primary = os.environ.get("AI_PROVIDER", "openai").strip().lower()
         chain_env = os.environ.get("AI_PROVIDER_CHAIN", "").strip()
         if chain_env:
             chain = [p.strip().lower() for p in chain_env.split(",") if p.strip()]
         else:
             chain = [primary, "anthropic", "gemini"]
-        # Ensure primary is at the head, dedupe while preserving order.
         seen: set = set()
         ordered: List[str] = []
         for p in [primary] + chain:
@@ -109,7 +127,6 @@ class AIProviderService:
         self._embed_cache: Dict[str, List[float]] = {}
         self._embed_cache_lock = asyncio.Lock()
 
-        # Set litellm to not modify environment proxy globals.
         litellm.drop_params = True
 
         logger.info(
@@ -118,6 +135,7 @@ class AIProviderService:
                 "provider_chain": self.provider_chain,
                 "api_base": self.api_base,
                 "embedding_model": self.embedding_model,
+                "groq_direct_enabled": bool(self.groq_api_key),
             },
         )
 
@@ -144,17 +162,31 @@ class AIProviderService:
     async def chat(
         self,
         messages: List[Dict[str, str]],
+        system_prompt: Optional[str] = None,
         json_mode: bool = False,
         temperature: float = 0.2,
         max_tokens: int = 1500,
         provider_chain: Optional[List[str]] = None,
+        agent_name: Optional[str] = None,
     ) -> ChatResult:
         """Run a chat completion with failover across providers.
 
-        Returns a ChatResult with provider_used, token_usage, latency_ms,
-        retry_count, and an optional fallback_event describing the first
-        successful fallback transition (if any).
+        Phase AGENTS Step 1: when `json_mode=True`, internally delegates to
+        `chat_json()` so JSON parsing + self-correction retry happens uniformly.
         """
+        if system_prompt:
+            messages = [{"role": "system", "content": system_prompt}] + list(messages)
+
+        if json_mode:
+            _parsed, result = await self.chat_json(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                provider_chain=provider_chain,
+                agent_name=agent_name,
+            )
+            return result
+
         chain = provider_chain or self.provider_chain
         total_retries = 0
         fallback_event: Optional[Dict[str, Any]] = None
@@ -162,12 +194,12 @@ class AIProviderService:
         primary_provider = chain[0]
 
         for idx, provider in enumerate(chain):
+            t0 = time.perf_counter()
             try:
-                t0 = time.perf_counter()
                 text, usage, retries = await self._chat_with_retry(
                     provider=provider,
                     messages=messages,
-                    json_mode=json_mode,
+                    json_mode=False,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -180,19 +212,40 @@ class AIProviderService:
                         "to_provider": provider,
                         "reason": last_error or "primary_failed",
                     }
+                model = PROVIDER_DEFAULT_CHAT_MODEL[provider]
+                self._log_usage_safe(
+                    kind="chat",
+                    provider=provider,
+                    model=model,
+                    agent_name=agent_name,
+                    usage=usage,
+                    latency_ms=latency_ms,
+                    success=True,
+                    error=None,
+                )
                 return ChatResult(
                     text=text,
-                    provider_used=f"{provider}:{PROVIDER_DEFAULT_CHAT_MODEL[provider]}",
+                    provider_used=f"{provider}:{model}",
                     token_usage=usage,
                     latency_ms=latency_ms,
                     retry_count=total_retries,
                     fallback_event=fallback_event,
                 )
-            except Exception as exc:  # noqa: BLE001 — provider may raise any exc
-                latency_ms = int((time.perf_counter() - t0) * 1000) if "t0" in locals() else 0
+            except Exception as exc:  # noqa: BLE001
+                latency_ms = int((time.perf_counter() - t0) * 1000)
                 err = f"{type(exc).__name__}: {exc}"
                 last_error = err
                 self._mark_health(provider, ok=False, latency_ms=latency_ms, error=err)
+                self._log_usage_safe(
+                    kind="chat",
+                    provider=provider,
+                    model=PROVIDER_DEFAULT_CHAT_MODEL.get(provider, "unknown"),
+                    agent_name=agent_name,
+                    usage={"prompt": 0, "completion": 0, "total": 0},
+                    latency_ms=latency_ms,
+                    success=False,
+                    error=err[:300],
+                )
                 logger.warning(
                     "provider_call_failed",
                     extra={"provider": provider, "error": err, "stage": "chat"},
@@ -209,10 +262,9 @@ class AIProviderService:
         temperature: float,
         max_tokens: int,
     ) -> Tuple[str, Dict[str, int], int]:
-        """One provider, up to 1 retry on transient errors."""
         retries = 0
         last_exc: Optional[Exception] = None
-        for attempt in range(2):  # initial + 1 retry
+        for attempt in range(2):
             try:
                 return await self._chat_once(
                     provider=provider,
@@ -226,7 +278,6 @@ class AIProviderService:
                 retries += 1
                 await asyncio.sleep(0.5 * (attempt + 1))
             except Exception as exc:
-                # Retry once on transient-looking errors, otherwise bubble up.
                 msg = str(exc).lower()
                 transient = any(
                     s in msg
@@ -251,26 +302,33 @@ class AIProviderService:
     ) -> Tuple[str, Dict[str, int], int]:
         model = PROVIDER_DEFAULT_CHAT_MODEL[provider]
 
-        # Build messages, injecting JSON instruction for providers without native JSON mode.
         msgs = list(messages)
         params: Dict[str, Any] = {
-            "model": model,  # short model name; api_base routing handles provider
+            "model": model,
             "messages": msgs,
-            "api_key": self.api_key,
-            "api_base": self.api_base,
-            "custom_llm_provider": "openai",  # Emergent proxy speaks OpenAI protocol
             "temperature": temperature,
             "max_tokens": max_tokens,
             "timeout": self.chat_timeout_s,
         }
-        if provider == "gemini":
-            # Gemini routed via the emergent proxy keeps the `gemini/` prefix.
-            params["model"] = f"gemini/{model}"
+
+        # Routing: direct Groq if key is provided; otherwise via Emergent proxy.
+        if provider == "groq" and self.groq_api_key:
+            params["model"] = f"groq/{model}"
+            params["api_key"] = self.groq_api_key
+            # No api_base => litellm uses Groq's default endpoint.
+        else:
+            params["api_key"] = self.api_key
+            params["api_base"] = self.api_base
+            params["custom_llm_provider"] = "openai"  # Emergent proxy speaks OpenAI protocol
+            if provider == "gemini":
+                params["model"] = f"gemini/{model}"
+            if provider == "groq":
+                # Attempting groq via Emergent proxy (may not be on the whitelist).
+                params["model"] = f"groq/{model}"
 
         if json_mode and provider in _JSON_MODE_NATIVE:
             params["response_format"] = {"type": "json_object"}
         elif json_mode:
-            # Force JSON via system instruction.
             params["messages"] = [
                 {
                     "role": "system",
@@ -303,19 +361,23 @@ class AIProviderService:
         messages: List[Dict[str, str]],
         temperature: float = 0.0,
         max_tokens: int = 2000,
+        provider_chain: Optional[List[str]] = None,
+        agent_name: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], ChatResult]:
         """Chat that returns parsed JSON, with 1 self-correction retry."""
-        result = await self.chat(
+        # We re-use the raw chat path (not chat() to avoid recursion via json_mode).
+        result = await self._chat_with_failover(
             messages=messages,
             json_mode=True,
             temperature=temperature,
             max_tokens=max_tokens,
+            provider_chain=provider_chain,
+            agent_name=agent_name,
         )
         parsed = _safe_json_parse(result.text)
         if parsed is not None:
             return parsed, result
 
-        # Self-correction retry.
         fix_messages = messages + [
             {"role": "assistant", "content": result.text},
             {
@@ -326,11 +388,13 @@ class AIProviderService:
                 ),
             },
         ]
-        result2 = await self.chat(
+        result2 = await self._chat_with_failover(
             messages=fix_messages,
             json_mode=True,
             temperature=0.0,
             max_tokens=max_tokens,
+            provider_chain=provider_chain,
+            agent_name=agent_name,
         )
         result2.retry_count += result.retry_count + 1
         parsed2 = _safe_json_parse(result2.text)
@@ -338,15 +402,100 @@ class AIProviderService:
             raise ValueError(f"LLM JSON parse failed after retry. Last text: {result2.text[:300]!r}")
         return parsed2, result2
 
+    async def _chat_with_failover(
+        self,
+        messages: List[Dict[str, str]],
+        json_mode: bool,
+        temperature: float,
+        max_tokens: int,
+        provider_chain: Optional[List[str]],
+        agent_name: Optional[str],
+    ) -> ChatResult:
+        """Internal: same loop as chat() but supports json_mode=True directly.
+
+        Kept separate from chat() to avoid recursion when chat_json() drives it.
+        """
+        chain = provider_chain or self.provider_chain
+        total_retries = 0
+        fallback_event: Optional[Dict[str, Any]] = None
+        last_error: Optional[str] = None
+        primary_provider = chain[0]
+
+        for idx, provider in enumerate(chain):
+            t0 = time.perf_counter()
+            try:
+                text, usage, retries = await self._chat_with_retry(
+                    provider=provider,
+                    messages=messages,
+                    json_mode=json_mode,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                total_retries += retries
+                self._mark_health(provider, ok=True, latency_ms=latency_ms, error=None)
+                if idx > 0:
+                    fallback_event = {
+                        "from_provider": primary_provider,
+                        "to_provider": provider,
+                        "reason": last_error or "primary_failed",
+                    }
+                model = PROVIDER_DEFAULT_CHAT_MODEL[provider]
+                self._log_usage_safe(
+                    kind="chat",
+                    provider=provider,
+                    model=model,
+                    agent_name=agent_name,
+                    usage=usage,
+                    latency_ms=latency_ms,
+                    success=True,
+                    error=None,
+                )
+                return ChatResult(
+                    text=text,
+                    provider_used=f"{provider}:{model}",
+                    token_usage=usage,
+                    latency_ms=latency_ms,
+                    retry_count=total_retries,
+                    fallback_event=fallback_event,
+                )
+            except Exception as exc:  # noqa: BLE001
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                err = f"{type(exc).__name__}: {exc}"
+                last_error = err
+                self._mark_health(provider, ok=False, latency_ms=latency_ms, error=err)
+                self._log_usage_safe(
+                    kind="chat",
+                    provider=provider,
+                    model=PROVIDER_DEFAULT_CHAT_MODEL.get(provider, "unknown"),
+                    agent_name=agent_name,
+                    usage={"prompt": 0, "completion": 0, "total": 0},
+                    latency_ms=latency_ms,
+                    success=False,
+                    error=err[:300],
+                )
+                logger.warning(
+                    "provider_call_failed",
+                    extra={"provider": provider, "error": err, "stage": "chat_json"},
+                )
+                continue
+        raise RuntimeError(f"All providers failed for chat: {last_error}")
+
     # --------------------------- Embed ------------------------------------
-    async def embed(self, texts: List[str]) -> EmbedResult:
+    async def embed(
+        self,
+        texts: List[str],
+        agent_name: Optional[str] = None,
+    ) -> EmbedResult:
         """Embed a list of strings; uses an in-memory content-hash cache."""
         if not texts:
-            return EmbedResult(vectors=[], provider_used="openai:" + self.embedding_model,
-                               token_usage={"prompt": 0, "completion": 0, "total": 0},
-                               latency_ms=0)
+            return EmbedResult(
+                vectors=[],
+                provider_used="local:" + _LOCAL_EMBED_MODEL_NAME,
+                token_usage={"prompt": 0, "completion": 0, "total": 0},
+                latency_ms=0,
+            )
 
-        # Check cache, identify cache misses to embed.
         keys = [_hash_text(t) for t in texts]
         cached: Dict[int, List[float]] = {}
         to_embed: List[Tuple[int, str]] = []
@@ -360,22 +509,45 @@ class AIProviderService:
 
         usage = {"prompt": 0, "completion": 0, "total": 0}
         latency_ms = 0
+        success = True
+        error_str: Optional[str] = None
         if to_embed:
             t0 = time.perf_counter()
             try:
                 vectors, usage = await self._embed_with_retry([t for _, t in to_embed])
-            finally:
+            except Exception as exc:
+                success = False
+                error_str = f"{type(exc).__name__}: {exc}"
                 latency_ms = int((time.perf_counter() - t0) * 1000)
+                self._log_usage_safe(
+                    kind="embed",
+                    provider="local",
+                    model=_LOCAL_EMBED_MODEL_NAME,
+                    agent_name=agent_name,
+                    usage=usage,
+                    latency_ms=latency_ms,
+                    success=False,
+                    error=error_str,
+                )
+                raise
+            latency_ms = int((time.perf_counter() - t0) * 1000)
             async with self._embed_cache_lock:
                 for (i, _txt), vec in zip(to_embed, vectors):
                     self._embed_cache[keys[i]] = vec
                     cached[i] = vec
 
         out_vectors = [cached[i] for i in range(len(texts))]
-        # Phase-0 compromise: the Emergent proxy doesn't expose embeddings, so
-        # we use a local high-quality model under the hood. The provider label
-        # reflects the actual backend.
         provider_label = f"local:{_LOCAL_EMBED_MODEL_NAME}"
+        self._log_usage_safe(
+            kind="embed",
+            provider="local",
+            model=_LOCAL_EMBED_MODEL_NAME,
+            agent_name=agent_name,
+            usage=usage,
+            latency_ms=latency_ms,
+            success=success,
+            error=error_str,
+        )
         return EmbedResult(
             vectors=out_vectors,
             provider_used=provider_label,
@@ -384,15 +556,11 @@ class AIProviderService:
         )
 
     async def _embed_with_retry(self, texts: List[str]) -> Tuple[List[List[float]], Dict[str, int]]:
-        """Embedding strategy with 2 retries.
+        """Embedding strategy with 2 retries (local backend; see note in docstring).
 
         PHASE-0 NOTE: the Emergent universal key proxy currently exposes only
-        chat models — not embeddings. We therefore use a high-quality local
-        embedding model (`BAAI/bge-base-en-v1.5` via fastembed/ONNX) as the
-        backend. These are REAL semantic embeddings (768-dim, dense, learned),
-        not mocked vectors. Cosine similarity ranking against them is real
-        semantic search. See MIGRATION_NOTES.md for the swap-path to OpenAI's
-        `text-embedding-3-large` when a real OpenAI key is available.
+        chat models — not embeddings. We use a local model (`BAAI/bge-base-en-v1.5`
+        via fastembed/ONNX). These are REAL semantic embeddings.
         """
         delays = [0.5, 1.5]
         last_exc: Optional[Exception] = None
@@ -412,6 +580,77 @@ class AIProviderService:
         assert last_exc is not None
         raise last_exc
 
+    # --------------------------- Usage logging ----------------------------
+    def _log_usage_safe(
+        self,
+        kind: str,
+        provider: str,
+        model: str,
+        agent_name: Optional[str],
+        usage: Dict[str, int],
+        latency_ms: int,
+        success: bool,
+        error: Optional[str],
+    ) -> None:
+        """Fire-and-forget Mongo write to `ai_usage_logs`.
+
+        Scheduled on the event loop so the LLM caller never blocks on logging.
+        Failures are swallowed (Mongo hiccup must not break a match run).
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(
+                self._log_usage(
+                    kind=kind,
+                    provider=provider,
+                    model=model,
+                    agent_name=agent_name,
+                    usage=usage,
+                    latency_ms=latency_ms,
+                    success=success,
+                    error=error,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ai_usage_log_schedule_failed", extra={"error": str(exc)})
+
+    async def _log_usage(
+        self,
+        kind: str,
+        provider: str,
+        model: str,
+        agent_name: Optional[str],
+        usage: Dict[str, int],
+        latency_ms: int,
+        success: bool,
+        error: Optional[str],
+    ) -> None:
+        # Lazy-import db to avoid a circular import at module load.
+        from db import get_db
+        tokens_in = int(usage.get("prompt", 0) or 0)
+        tokens_out = int(usage.get("completion", 0) or 0)
+        total = int(usage.get("total", 0) or (tokens_in + tokens_out))
+        cost = _estimate_cost(provider, model, tokens_in, tokens_out)
+        doc = {
+            "kind": kind,                # "chat" | "embed"
+            "provider": provider,
+            "model": model,
+            "agent_name": agent_name,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "total_tokens": total,
+            "latency_ms": latency_ms,
+            "cost_usd": cost,
+            "success": success,
+            "error": error,
+            "created_at": datetime.now(timezone.utc),
+        }
+        try:
+            db = get_db()
+            await db.ai_usage_logs.insert_one(doc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ai_usage_log_write_failed", extra={"error": str(exc)})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -420,8 +659,19 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _estimate_cost(provider: str, model: str, tokens_in: int, tokens_out: int) -> Optional[float]:
+    key = f"{provider}:{model}"
+    table = COST_PER_1K_TOKENS.get(key)
+    if not table:
+        return None
+    return round(
+        (tokens_in / 1000.0) * table["input"] + (tokens_out / 1000.0) * table["output"],
+        6,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Local embedding backend (Phase 0 compromise — see _embed_with_retry docstring)
+# Local embedding backend
 # ---------------------------------------------------------------------------
 _LOCAL_EMBED_MODEL = None
 _LOCAL_EMBED_MODEL_NAME = "BAAI/bge-base-en-v1.5"
@@ -439,7 +689,6 @@ def _get_local_embed_model():
 def _local_embed_sync(texts: List[str]) -> Tuple[List[List[float]], Dict[str, int]]:
     model = _get_local_embed_model()
     vectors = [v.tolist() for v in model.embed(texts)]
-    # Rough token-equivalent (4 chars/token).
     total_chars = sum(len(t) for t in texts)
     usage = {"prompt": total_chars // 4, "completion": 0, "total": total_chars // 4}
     return vectors, usage
@@ -449,13 +698,11 @@ def _safe_json_parse(text: str) -> Optional[Any]:
     if not text:
         return None
     s = text.strip()
-    # Strip markdown fences if any LLM ignored instructions.
     if s.startswith("```"):
         s = s.strip("`")
         if s.lower().startswith("json"):
             s = s[4:]
         s = s.strip()
-    # Find first { and last } if there is surrounding prose.
     if not (s.startswith("{") or s.startswith("[")):
         first_brace = min((idx for idx in (s.find("{"), s.find("[")) if idx >= 0), default=-1)
         if first_brace >= 0:

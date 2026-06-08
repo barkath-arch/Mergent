@@ -71,7 +71,50 @@ async def ensure_indexes() -> None:
     ))
     await _swallow("solutions_category")(db.solutions.create_index("category", name="solutions_category_idx", background=True))
     await _swallow("solutions_title_unique")(db.solutions.create_index("title", unique=True, name="solutions_title_unique", background=True))
-    await _swallow("runs_created")(db.orchestration_runs.create_index("created_at", name="runs_created_idx", background=True))
+
+    # ------------------------------------------------------------------ #
+    # Phase AGENTS Step 1: collection rename `orchestration_runs` -> `match_runs`.
+    # One-time copy if match_runs is empty AND the legacy collection exists.
+    # The legacy collection is NOT dropped (kept for safety / rollback).
+    # ------------------------------------------------------------------ #
+    try:
+        match_count = await db.match_runs.estimated_document_count()
+        if match_count == 0:
+            existing_collections = await db.list_collection_names()
+            if "orchestration_runs" in existing_collections:
+                legacy_count = await db.orchestration_runs.estimated_document_count()
+                if legacy_count > 0:
+                    docs = [d async for d in db.orchestration_runs.find({})]
+                    if docs:
+                        await db.match_runs.insert_many(docs, ordered=False)
+                        logger.info("match_runs_migrated", extra={"copied": len(docs)})
+    except Exception as exc:
+        logger.warning("match_runs_migration_failed", extra={"error": str(exc)})
+
+    # match_runs indexes (the new canonical collection)
+    await _swallow("runs_created")(db.match_runs.create_index("created_at", name="runs_created_idx", background=True))
+    await _swallow("runs_buyer_created")(db.match_runs.create_index(
+        [("buyer_id", 1), ("created_at", -1)], name="runs_buyer_created_idx", background=True,
+    ))
+
+    # ai_usage_logs (Phase AGENTS Step 1)
+    await _swallow("ai_usage_agent_created")(db.ai_usage_logs.create_index(
+        [("agent_name", 1), ("created_at", -1)], name="ai_usage_agent_created_idx", background=True,
+    ))
+    await _swallow("ai_usage_ttl")(db.ai_usage_logs.create_index(
+        "created_at", name="ai_usage_ttl", expireAfterSeconds=2592000, background=True,
+    ))
+
+    # agent_runs (Phase AGENTS Step 1)
+    await _swallow("agent_runs_agent_created")(db.agent_runs.create_index(
+        [("agent_name", 1), ("created_at", -1)], name="agent_runs_agent_created_idx", background=True,
+    ))
+    await _swallow("agent_runs_run_id")(db.agent_runs.create_index(
+        "run_id", name="agent_runs_run_id_idx", background=True,
+    ))
+    await _swallow("agent_runs_ttl")(db.agent_runs.create_index(
+        "created_at", name="agent_runs_ttl", expireAfterSeconds=2592000, background=True,
+    ))
 
     # Phase R additions
     await _swallow("users_email_unique")(db.users.create_index("email", unique=True, name="users_email_unique", background=True))

@@ -29,10 +29,10 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status  # noqa: E402
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
-from auth import require_role  # noqa: E402
+from auth import optional_user, require_role  # noqa: E402
 from db import close_db, ensure_indexes, get_db, with_retry  # noqa: E402
 from models import MatchAcceptedResponse, MatchRequest  # noqa: E402
 from services.ai_provider import get_ai_provider  # noqa: E402
@@ -104,13 +104,23 @@ def _validate_requirement_text(text: Optional[str]) -> str:
 
 
 @api_router.post("/match", response_model=MatchAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
-async def post_match(payload: MatchRequest) -> MatchAcceptedResponse:
+async def post_match(
+    payload: MatchRequest,
+    current_user: Optional[Dict[str, Any]] = Depends(optional_user),
+) -> MatchAcceptedResponse:
     text = _validate_requirement_text(payload.requirement_text)
     db = get_db()
     run_id = _new_uuid()
     now = _now_iso()
+
+    # Auto-fill buyer_id from Bearer token when present; explicit body value wins.
+    buyer_id: Optional[str] = payload.buyer_id
+    if buyer_id is None and current_user is not None:
+        buyer_id = str(current_user.get("id") or "") or None
+
     run_doc = {
         "_id": run_id,
+        "buyer_id": buyer_id,
         "requirement_text": text,
         "status": "running",
         "steps": [],
@@ -123,17 +133,17 @@ async def post_match(payload: MatchRequest) -> MatchAcceptedResponse:
         "created_at": now,
         "updated_at": now,
     }
-    await with_retry(lambda: db.orchestration_runs.insert_one(run_doc))
+    await with_retry(lambda: db.match_runs.insert_one(run_doc))
 
     orch = get_orchestrator()
-    asyncio.create_task(orch.run_match(text, run_id))
+    asyncio.create_task(orch.run_match(text, run_id, buyer_id=buyer_id))
     return MatchAcceptedResponse(run_id=run_id)
 
 
 @api_router.get("/match/{run_id}")
 async def get_match(run_id: str) -> Dict[str, Any]:
     db = get_db()
-    doc = await db.orchestration_runs.find_one({"_id": run_id})
+    doc = await db.match_runs.find_one({"_id": run_id})
     if not doc:
         raise HTTPException(status_code=404, detail={"error": "run_not_found"})
     return _serialize_run(doc)
@@ -142,7 +152,7 @@ async def get_match(run_id: str) -> Dict[str, Any]:
 @api_router.get("/match/{run_id}/trace")
 async def get_match_trace(run_id: str) -> Dict[str, Any]:
     db = get_db()
-    doc = await db.orchestration_runs.find_one({"_id": run_id})
+    doc = await db.match_runs.find_one({"_id": run_id})
     if not doc:
         raise HTTPException(status_code=404, detail={"error": "run_not_found"})
     return {
@@ -224,7 +234,7 @@ async def admin_providers_health(_admin: Dict[str, Any] = Depends(require_role("
 async def admin_runs(limit: int = 20, _admin: Dict[str, Any] = Depends(require_role("admin"))) -> Dict[str, Any]:
     limit = max(1, min(int(limit), 100))
     db = get_db()
-    cursor = db.orchestration_runs.find(
+    cursor = db.match_runs.find(
         {},
         {
             "_id": 1,

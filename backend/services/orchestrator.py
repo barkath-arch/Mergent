@@ -1,16 +1,18 @@
 """MergentOrchestrator — sequences agents and emits per-step WS events.
 
-Concurrency model:
-  - Each call to `run_match(...)` is a fresh asyncio.Task spawned by the API
-    handler. Each task owns its own `ctx` dict — no shared mutable state across
-    runs. Therefore concurrent runs do not block one another and never bleed
-    state between runs.
-  - The orchestrator does NOT hold the global event loop; it only awaits
-    individual agent coroutines.
-  - WS broadcast goes through services.ws_manager.WSManager which is per-run
-    keyed; subscribers to run A never see events for run B.
-  - The run document is written incrementally via motor (`$push` on steps).
-    Each step append is a single atomic Mongo op.
+Phase AGENTS Step 1 changes:
+  - Renamed Mongo collection from `orchestration_runs` to `match_runs`.
+  - `run_match` now accepts an optional `buyer_id` (string) recorded on the doc.
+  - Per agent, an additional human-readable `agent_step` event is emitted with
+    `{event: "agent_step", type: "agent_step", agent, status: "running"|"done",
+    message: "...", ts}`. The existing detailed events (`started`/`completed`/
+    `failed`/`retried`, `provider_fallback`, `run_completed`/`run_failed`) are
+    preserved — additive, not replacing.
+  - Synthetic "Preparing your recommendations..." emitted just before
+    `run_completed`.
+
+Concurrency: unchanged — each `run_match(...)` is its own asyncio.Task with an
+isolated `ctx` dict. Per-run WSManager channel keeps subscribers isolated.
 """
 from __future__ import annotations
 
@@ -39,8 +41,6 @@ from agents import compression as _compression
 from agents import ranking as _ranking
 
 
-# Static agent registry — explicit imports avoid dynamic __import__() and make
-# pipeline membership trivially auditable.
 PIPELINE: List[Dict[str, Any]] = [
     {"agent": "IntakeAgent", "run": _intake.run},
     {"agent": "RequirementParserAgent", "run": _parser.run},
@@ -50,12 +50,32 @@ PIPELINE: List[Dict[str, Any]] = [
     {"agent": "RankingAgent", "run": _ranking.run},
 ]
 
+# Human-readable progress messages shown to the user during the run.
+AGENT_PROGRESS_MESSAGES: Dict[str, str] = {
+    "IntakeAgent": "Understanding your business requirement...",
+    "RequirementParserAgent": "Understanding your business requirement...",
+    "EmbeddingAgent": "Searching the marketplace semantically...",
+    "SemanticSearchAgent": "Searching the marketplace semantically...",
+    "ContextCompressionAgent": "Validating top results...",
+    "RankingAgent": "Scoring solution matches...",
+}
+SYNTHETIC_FINAL_MESSAGE = "Preparing your recommendations..."
+
 
 class MergentOrchestrator:
-    async def run_match(self, requirement_text: str, run_id: str) -> Dict[str, Any]:
+    async def run_match(
+        self,
+        requirement_text: str,
+        run_id: str,
+        buyer_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         ws = get_ws_manager()
         db = get_db()
-        ctx: Dict[str, Any] = {"requirement_text": requirement_text, "run_id": run_id}
+        ctx: Dict[str, Any] = {
+            "requirement_text": requirement_text,
+            "run_id": run_id,
+            "buyer_id": buyer_id,
+        }
         total_t0 = time.perf_counter()
         providers_used: List[str] = []
         total_tokens = 0
@@ -82,12 +102,22 @@ class MergentOrchestrator:
                 retry_count += int(step_record.get("retry_count") or 0)
 
                 if step_record["status"] == "failed":
-                    # Stop the pipeline on a hard failure.
                     raise RuntimeError(f"{agent_name} failed: {step_record.get('error')}")
 
             ranked = ctx.get("ranked", [])
             total_ms = int((time.perf_counter() - total_t0) * 1000)
-            await with_retry(lambda: db.orchestration_runs.update_one(
+
+            # Synthetic final progress message before run_completed.
+            await ws.broadcast(run_id, {
+                "type": "agent_step",
+                "event": "agent_step",
+                "agent": "Orchestrator",
+                "status": "running",
+                "message": SYNTHETIC_FINAL_MESSAGE,
+                "ts": _now_iso(),
+            })
+
+            await with_retry(lambda: db.match_runs.update_one(
                 {"_id": run_id},
                 {
                     "$set": {
@@ -115,6 +145,7 @@ class MergentOrchestrator:
                 "run_completed",
                 extra={
                     "run_id": run_id,
+                    "buyer_id": buyer_id,
                     "total_execution_ms": total_ms,
                     "total_tokens": total_tokens,
                     "result_count": len(ranked),
@@ -127,7 +158,7 @@ class MergentOrchestrator:
             err = f"{type(exc).__name__}: {exc}"
             tb = traceback.format_exc()
             err_doc = {"type": type(exc).__name__, "message": str(exc), "trace": tb[:2000]}
-            await with_retry(lambda: db.orchestration_runs.update_one(
+            await with_retry(lambda: db.match_runs.update_one(
                 {"_id": run_id},
                 {
                     "$set": {
@@ -163,6 +194,9 @@ class MergentOrchestrator:
     ) -> Dict[str, Any]:
         started_at = _now_iso()
         t0 = time.perf_counter()
+        progress_msg = AGENT_PROGRESS_MESSAGES.get(agent_name, "")
+
+        # Legacy detailed `started` event (existing consumers depend on this).
         started_event = {
             "type": "agent_step",
             "run_id": run_id,
@@ -173,8 +207,18 @@ class MergentOrchestrator:
         }
         await ws.broadcast(run_id, started_event)
 
-        # Append a "started" step snapshot.
-        await with_retry(lambda: db.orchestration_runs.update_one(
+        # NEW human-readable `running` event.
+        if progress_msg:
+            await ws.broadcast(run_id, {
+                "type": "agent_step",
+                "event": "agent_step",
+                "agent": agent_name,
+                "status": "running",
+                "message": progress_msg,
+                "ts": started_at,
+            })
+
+        await with_retry(lambda: db.match_runs.update_one(
             {"_id": run_id},
             {"$push": {"steps": {
                 "agent": agent_name,
@@ -209,14 +253,13 @@ class MergentOrchestrator:
             }
             failed_event = {**step, "type": "agent_step", "ts": ended_at}
             await ws.broadcast(run_id, failed_event)
-            await with_retry(lambda: db.orchestration_runs.update_one(
+            await with_retry(lambda: db.match_runs.update_one(
                 {"_id": run_id},
                 {"$push": {"steps": step}, "$set": {"updated_at": _now_iso()}},
             ))
             logger.exception("agent_failed", extra={"run_id": run_id, "agent": agent_name})
             return step
 
-        # Merge agent output into ctx (drop private keys that carry result objects).
         provider_used: Optional[str] = None
         token_usage: Optional[Dict[str, int]] = None
         fallback_event = None
@@ -246,7 +289,6 @@ class MergentOrchestrator:
         if agent_name == "RankingAgent":
             rerank_latency_ms = execution_ms
 
-        # Build a sanitized payload for persistence/WS (exclude vectors, embeddings).
         public_payload = _sanitize_payload(agent_name, output)
 
         step = {
@@ -266,7 +308,18 @@ class MergentOrchestrator:
             "retry_count": retries,
             "payload": public_payload,
         }
+        # Legacy detailed `completed` event.
         await ws.broadcast(run_id, {**step, "type": "agent_step", "ts": ended_at})
+        # NEW human-readable `done` event.
+        if progress_msg:
+            await ws.broadcast(run_id, {
+                "type": "agent_step",
+                "event": "agent_step",
+                "agent": agent_name,
+                "status": "done",
+                "message": progress_msg,
+                "ts": ended_at,
+            })
         if fallback_event:
             await ws.broadcast(run_id, {
                 "type": "provider_fallback",
@@ -287,7 +340,7 @@ class MergentOrchestrator:
                 "ts": ended_at,
             })
 
-        await with_retry(lambda: db.orchestration_runs.update_one(
+        await with_retry(lambda: db.match_runs.update_one(
             {"_id": run_id},
             {"$push": {"steps": step}, "$set": {"updated_at": _now_iso()}},
         ))
@@ -295,7 +348,6 @@ class MergentOrchestrator:
 
 
 def _sanitize_payload(agent_name: str, output: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip large fields (vectors, full docs) before persisting/streaming."""
     if agent_name == "EmbeddingAgent":
         return {
             "requirement_summary": output.get("requirement_summary", ""),

@@ -72,7 +72,7 @@ async def create_checkout(req: Request, body: CheckoutIn, user: Dict[str, Any] =
     # be the top-1 of that run's ranking.
     integrity_status = "n/a"
     if body.run_id:
-        run = await db.orchestration_runs.find_one({"_id": body.run_id})
+        run = await db.match_runs.find_one({"_id": body.run_id})
         if not run:
             raise HTTPException(404, detail={"error": "run_not_found", "run_id": body.run_id})
         top = ((run.get("result") or [{}])[:1] or [{}])[0]

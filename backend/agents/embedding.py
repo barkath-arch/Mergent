@@ -1,17 +1,16 @@
-"""EmbeddingAgent — compute query embedding via AIProviderService.embed."""
+"""EmbeddingAgent — compute query embedding via the AI provider.
+
+Phase AGENTS Step 1: subclass of `BaseAgent`; embed call routed through
+`self._embed()` so `ai_usage_logs` records `agent_name`.
+"""
 from __future__ import annotations
 
 from typing import Any, Dict
 
-from services.ai_provider import get_ai_provider
+from agents.base import BaseAgent
 
 
 def _build_requirement_summary(ctx: Dict[str, Any]) -> str:
-    """Compose a compact text used as the embedding input.
-
-    Combines the user's normalized requirement with parser-extracted features so
-    that semantic search has rich context to match against.
-    """
     parsed = ctx.get("parsed_requirement", {}) or {}
     parts = [ctx.get("normalized_text", "")]
     cat = parsed.get("category")
@@ -29,12 +28,19 @@ def _build_requirement_summary(ctx: Dict[str, Any]) -> str:
     return "\n".join(p for p in parts if p)
 
 
+class EmbeddingAgent(BaseAgent):
+    agent_name = "EmbeddingAgent"
+    agent_version = "1.0.0"
+
+    async def run(self, input: Dict[str, Any]) -> Dict[str, Any]:  # noqa: A002
+        summary = _build_requirement_summary(input)
+        vec, result = await self._embed(summary)
+        return {
+            "requirement_summary": summary,
+            "query_vector": vec,
+            "_embed_result": result,
+        }
+
+
 async def run(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    provider = get_ai_provider()
-    summary = _build_requirement_summary(ctx)
-    result = await provider.embed([summary])
-    return {
-        "requirement_summary": summary,
-        "query_vector": result.vectors[0] if result.vectors else [],
-        "_embed_result": result,
-    }
+    return await EmbeddingAgent().execute(ctx, run_id=ctx.get("run_id"))

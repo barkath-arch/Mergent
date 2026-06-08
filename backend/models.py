@@ -90,6 +90,7 @@ class OrchestrationRun(BaseModel):
 # ---------------------------------------------------------------------------
 class MatchRequest(BaseModel):
     requirement_text: str
+    buyer_id: Optional[str] = None
 
 
 class MatchAcceptedResponse(BaseModel):

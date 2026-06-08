@@ -38,7 +38,34 @@ history is preserved below; the top sections reflect current truth.
   redeploy actions (simulated infra, real state machine).
 - **Phase R additions** (this iteration): unique-email + TTL + compound
   indexes on Mongo collections; `/api/admin/*` admin-gated; Redis +
-  celery_worker + celery_beat under supervisor; 3 seed users for testers.
+  celery_worker + celery_beat running under supervisor; 3 seed users for testers.
+- **Phase AGENTS — Step 1 (Foundation)** additions:
+  - `BaseAgent` class hierarchy (`/app/backend/agents/base.py`); the 6
+    existing pipeline agents (Intake / RequirementParser / Embedding /
+    SemanticSearch / ContextCompression / Ranking) now subclass `BaseAgent`
+    while keeping the module-level `run(ctx)` shim so the orchestrator's
+    static PIPELINE keeps working.
+  - `db.agent_runs` collection: one document per agent execution, capturing
+    `agent_name`, `agent_version`, `run_id`, sanitized input/output JSON,
+    duration, success/error. 30-day TTL.
+  - `db.ai_usage_logs` collection: one document per LLM/embed call,
+    capturing `kind` (chat|embed), `provider`, `model`, `agent_name`,
+    `tokens_in`, `tokens_out`, `total_tokens`, `latency_ms`, `cost_usd`
+    (rough estimate via per-provider lookup table), `success`, `error`.
+    30-day TTL.
+  - `AIProviderService` extended: `groq` registered as 4th provider
+    (opt-in via `AI_PROVIDER_CHAIN`); uses direct Groq API when
+    `GROQ_API_KEY` is set, else attempts the Emergent proxy. Default chain
+    stays `openai,anthropic,gemini`. `chat()` / `chat_json()` / `embed()`
+    now accept an optional `agent_name` kwarg flowed into `ai_usage_logs`.
+  - Orchestrator collection rename: `orchestration_runs` → `match_runs`
+    (one-time copy migration in `db.ensure_indexes()`; legacy collection
+    preserved for rollback). New field `buyer_id` on every run doc;
+    auto-filled from the Bearer token when the caller is authenticated.
+  - Orchestrator now emits additional human-readable `agent_step` WS events
+    with `{event, agent, status: "running"|"done", message}` for 6 agents
+    (paired) + a synthetic `"Preparing your recommendations..."` event
+    before `run_completed`. Legacy detailed events preserved (additive).
 
 ### Stubbed / Simulated (works end-to-end but with documented short-circuits)
 
@@ -87,7 +114,8 @@ history is preserved below; the top sections reflect current truth.
 | 7     | Notifications + Saved Items + Audit                        | done        |
 | 9     | Forking (real) — lineage primitives migrated, route stub   | 501 stub    |
 | 10    | Stripe Connect real payouts                                | not started |
-| R     | Restoration & Hardening: env + indexes + admin auth + seed | in-progress |
+| R     | Restoration & Hardening: env + indexes + admin auth + seed | done        |
+| AGENTS-S1 | Agents foundation: BaseAgent + ai_usage_logs + agent_runs + match_runs | done |
 | A     | Decide & deliver: ONE of {Real Forking, Tech Preview, Run history} | planned |
 | B     | Master Orchestrator scaffold + reflection loop (1 agent)   | planned     |
 | C     | Vision Intelligence agents (UI/UX/Security/A11y/Perf)      | planned     |

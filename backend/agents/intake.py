@@ -1,8 +1,14 @@
-"""IntakeAgent — normalises user input and extracts cheap heuristic signals."""
+"""IntakeAgent — normalises user input and extracts cheap heuristic signals.
+
+Phase AGENTS Step 1: now a `BaseAgent` subclass. Module-level `run(ctx)` is
+kept as a thin shim so the orchestrator's static PIPELINE keeps working.
+"""
 from __future__ import annotations
 
 import re
 from typing import Any, Dict
+
+from agents.base import BaseAgent
 
 
 _BUDGET_RE = re.compile(r"(?:\$|usd|inr|₹|€|£)\s?(\d[\d,\.]*)\s?(k|m|thousand|million)?", re.IGNORECASE)
@@ -44,17 +50,28 @@ def _detect_maturity(text: str) -> str:
     return "unspecified"
 
 
+class IntakeAgent(BaseAgent):
+    agent_name = "IntakeAgent"
+    agent_version = "1.0.0"
+
+    async def run(self, input: Dict[str, Any]) -> Dict[str, Any]:  # noqa: A002
+        requirement_text: str = input["requirement_text"]
+        normalized = " ".join(requirement_text.split()).strip()
+        signals = {
+            "budget": _detect_budget(normalized),
+            "urgency": _detect_urgency(normalized),
+            "deployment_maturity_hint": _detect_maturity(normalized),
+            "char_len": len(normalized),
+            "token_estimate": len(normalized) // 4,
+        }
+        return {
+            "normalized_text": normalized,
+            "signals": signals,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Module-level shim — keeps the orchestrator's static PIPELINE working.
+# ---------------------------------------------------------------------------
 async def run(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    requirement_text: str = ctx["requirement_text"]
-    normalized = " ".join(requirement_text.split()).strip()
-    signals = {
-        "budget": _detect_budget(normalized),
-        "urgency": _detect_urgency(normalized),
-        "deployment_maturity_hint": _detect_maturity(normalized),
-        "char_len": len(normalized),
-        "token_estimate": len(normalized) // 4,
-    }
-    return {
-        "normalized_text": normalized,
-        "signals": signals,
-    }
+    return await IntakeAgent().execute(ctx, run_id=ctx.get("run_id"))

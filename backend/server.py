@@ -322,6 +322,7 @@ def _new_uuid() -> str:
 def _serialize_run(doc: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "run_id": doc["_id"],
+        "buyer_id": doc.get("buyer_id"),
         "requirement_text": doc.get("requirement_text", ""),
         "status": doc.get("status"),
         "steps": doc.get("steps", []),
@@ -333,6 +334,7 @@ def _serialize_run(doc: Dict[str, Any]) -> Dict[str, Any]:
         "retry_count": doc.get("retry_count", 0),
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
+        "error": doc.get("error"),
     }
 
 

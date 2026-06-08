@@ -106,3 +106,40 @@
 - Main agent (Phase R initial): backend env restored, indexes added,
   /api/admin/* gated to admin, redis + celery_worker + celery_beat
   supervised, seed catalogue + seed users run. Awaiting tester verification.
+
+- Main agent (Phase AGENTS Step 1 fix-up):
+  - **Defect 1 (buyer_id missing in GET response)** — ROOT CAUSE:
+    `_serialize_run()` in `/app/backend/server.py:322` was omitting the
+    `buyer_id` field from its returned dict. The field WAS being written
+    to Mongo correctly (confirmed via `match_runs.find_one()`). Fix: added
+    `"buyer_id": doc.get("buyer_id")` and `"error": doc.get("error")`
+    to `_serialize_run`. Verified: authed POST → response now has
+    `buyer_id == current_user.id`; anonymous POST → response has
+    `buyer_id: null` (field present).
+  - **Defect 2 (redis/celery DOWN in /api/health)** — ROOT CAUSE: container
+    pod restarted between Phase R completion and tester run, which wiped
+    `/usr/bin/redis-server` (only `/app` persists). Supervisor logged
+    `redis FATAL: can't find command '/usr/bin/redis-server'`. The
+    Celery worker stayed in RUNNING state but couldn't reach the broker,
+    so the backend's `/api/health` Celery ping timed out and reported
+    `celery: "down"`. Fix: created `/app/bin/start-redis.sh` (1 KB shell
+    wrapper) that `apt-get install`s `redis-server` if missing, then
+    execs it. Updated `/etc/supervisor/conf.d/supervisord_phase_r.conf`
+    to point `[program:redis]` at the wrapper. `supervisorctl reread &&
+    update && restart redis celery_worker celery_beat` brought all 7
+    services back. `/api/health` now reports `redis: "up"`, `celery: "up"`.
+  - **Defect 3 (WS public→internal 307 redirect)** — VERIFIED tester-tool
+    artifact only. Frontend (`/app/frontend/src/lib/api.js:10-12`)
+    constructs `WS_BASE` from `window.location.origin` when the page is
+    served from `*.emergentagent.com`, so the browser never sees the
+    redirect. Mobile uses the same pattern via `EXPO_PUBLIC_BACKEND_URL`.
+    Documented under "Known testing-environment quirks" above with
+    guidance for running the Python `websockets` lib (use
+    `ws://localhost:8001/...` from inside the pod, or use a browser
+    context that auto-follows redirects).
+
+## Known testing-environment quirks (not application bugs)
+
+- **WS public→internal 307 redirect.** A direct `wss://github-deploy-hub-1.preview.emergentagent.com/api/ws/match/{run_id}` connection initiated from outside the cluster (e.g. the Python `websockets` library) receives a `307 Temporary Redirect` to the internal preview host. **This is a tester-tool artifact only.** Browser clients (web frontend on the public preview origin, Expo on the same `EXPO_PUBLIC_BACKEND_URL`) construct `wss://` URLs from `window.location.origin` / the configured backend URL and stay same-origin, so they never trigger the redirect — verified in `/app/frontend/src/lib/api.js:10-12` (`WS_BASE = BACKEND.replace(/^http/i, "ws") + "/api/ws"`) where `BACKEND` defaults to the live origin when running on `*.emergentagent.com`. Tester guidance: when validating WS with the Python `websockets` lib, connect via `ws://localhost:8001/api/ws/match/{run_id}` from inside the pod (same-pod localhost — no ingress in the path), or use `httpx`/`Playwright` browser context (which auto-follows the redirect).
+
+- **Self-healing Redis.** The `redis-server` binary lives in `/usr/bin` which is wiped on container restart. Supervisor program `[program:redis]` now invokes `/app/bin/start-redis.sh` (a 1-KB shell wrapper) which `apt-get install`s `redis-server` if `/usr/bin/redis-server` is missing, then `exec`s it. Net effect: Redis survives pod restarts without manual intervention.

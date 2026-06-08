@@ -131,7 +131,7 @@ def _from() -> str:
 
 
 def _base_url() -> str:
-    return os.environ.get("NOTIFICATION_BASE_URL", "https://find-deploy-rank.preview.emergentagent.com")
+    return os.environ.get("NOTIFICATION_BASE_URL", "https://github-deploy-hub-1.preview.emergentagent.com")
 
 
 def make_unsubscribe_token(user_id: str, category: str) -> str:

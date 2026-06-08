@@ -34,7 +34,7 @@ VALID_STATES = ["initiated", "funded", "in_progress", "delivered", "released", "
 class CheckoutIn(BaseModel):
     solution_id: str
     run_id: Optional[str] = None  # for MATCH INTEGRITY enforcement
-    origin_url: str = Field(default="https://find-deploy-rank.preview.emergentagent.com")
+    origin_url: str = Field(default="https://github-deploy-hub-1.preview.emergentagent.com")
 
 
 class AdvanceIn(BaseModel):

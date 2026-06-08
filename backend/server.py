@@ -29,9 +29,10 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status  # noqa: E402
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
+from auth import require_role  # noqa: E402
 from db import close_db, ensure_indexes, get_db, with_retry  # noqa: E402
 from models import MatchAcceptedResponse, MatchRequest  # noqa: E402
 from services.ai_provider import get_ai_provider  # noqa: E402
@@ -179,8 +180,7 @@ async def ws_match(websocket: WebSocket, run_id: str) -> None:
 # Admin / health endpoints
 # ---------------------------------------------------------------------------
 @api_router.post("/admin/solutions/reindex")
-async def admin_reindex() -> Dict[str, Any]:
-    # TODO(Phase 1): protect this endpoint with auth.
+async def admin_reindex(_admin: Dict[str, Any] = Depends(require_role("admin"))) -> Dict[str, Any]:
     try:
         from tasks import reindex_all_solutions
         async_result = await asyncio.wait_for(
@@ -199,10 +199,10 @@ async def admin_reindex() -> Dict[str, Any]:
 
 
 @api_router.get("/admin/orchestration/_debug")
-async def admin_orchestration_debug() -> Dict[str, Any]:
+async def admin_orchestration_debug(_admin: Dict[str, Any] = Depends(require_role("admin"))) -> Dict[str, Any]:
     """Introspection endpoint for tests — exposes WS channel counts and
     provider cache state so memory-leak / channel-cleanup assertions can be
-    made externally. Phase 0: unauthenticated. TODO(Phase 1): protect.
+    made externally. Admin-only since Phase R.
     """
     ws = get_ws_manager()
     provider = get_ai_provider()
@@ -215,13 +215,13 @@ async def admin_orchestration_debug() -> Dict[str, Any]:
 
 
 @api_router.get("/admin/providers/health")
-async def admin_providers_health() -> Dict[str, Any]:
+async def admin_providers_health(_admin: Dict[str, Any] = Depends(require_role("admin"))) -> Dict[str, Any]:
     provider = get_ai_provider()
     return {"providers": provider.health_snapshot(), "chain": provider.provider_chain}
 
 
 @api_router.get("/admin/orchestration/runs")
-async def admin_runs(limit: int = 20) -> Dict[str, Any]:
+async def admin_runs(limit: int = 20, _admin: Dict[str, Any] = Depends(require_role("admin"))) -> Dict[str, Any]:
     limit = max(1, min(int(limit), 100))
     db = get_db()
     cursor = db.orchestration_runs.find(

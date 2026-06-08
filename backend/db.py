@@ -52,12 +52,51 @@ async def with_retry(coro_factory, attempts: int = 2, base_delay: float = 0.3) -
 
 async def ensure_indexes() -> None:
     db = get_db()
-    await db.solutions.create_index(
+
+    def _swallow(label: str):
+        """Decorator-ish: log & ignore IndexAlreadyExists style failures."""
+        async def _wrap(coro):
+            try:
+                await coro
+            except Exception as exc:
+                logger.warning("index_create_failed", extra={"index": label, "error": str(exc)})
+        return _wrap
+
+    # solutions (existing)
+    await _swallow("solutions_text")(db.solutions.create_index(
         [("title", "text"), ("description", "text"), ("tags", "text")],
         name="solutions_text_idx",
         default_language="english",
-    )
-    await db.solutions.create_index("category", name="solutions_category_idx")
-    await db.solutions.create_index("title", unique=True, name="solutions_title_unique")
-    await db.orchestration_runs.create_index("created_at", name="runs_created_idx")
+        background=True,
+    ))
+    await _swallow("solutions_category")(db.solutions.create_index("category", name="solutions_category_idx", background=True))
+    await _swallow("solutions_title_unique")(db.solutions.create_index("title", unique=True, name="solutions_title_unique", background=True))
+    await _swallow("runs_created")(db.orchestration_runs.create_index("created_at", name="runs_created_idx", background=True))
+
+    # Phase R additions
+    await _swallow("users_email_unique")(db.users.create_index("email", unique=True, name="users_email_unique", background=True))
+    await _swallow("ev_tokens_ttl")(db.email_verification_tokens.create_index(
+        "expires_at", name="ev_tokens_ttl", expireAfterSeconds=0, background=True,
+    ))
+    await _swallow("pw_reset_tokens_ttl")(db.password_reset_tokens.create_index(
+        "expires_at", name="pw_reset_tokens_ttl", expireAfterSeconds=0, background=True,
+    ))
+    await _swallow("conv_participants")(db.conversations.create_index("participants", name="conv_participants_idx", background=True))
+    await _swallow("messages_conv_ts")(db.messages.create_index(
+        [("conversation_id", 1), ("created_at", 1)], name="messages_conv_ts_idx", background=True,
+    ))
+    await _swallow("notif_user_read_ts")(db.notifications.create_index(
+        [("user_id", 1), ("read", 1), ("created_at", -1)], name="notif_user_read_ts_idx", background=True,
+    ))
+    await _swallow("saved_user_sol_unique")(db.saved_items.create_index(
+        [("user_id", 1), ("solution_id", 1)], unique=True, name="saved_user_sol_unique", background=True,
+    ))
+    await _swallow("reviews_solution")(db.reviews.create_index("solution_id", name="reviews_solution_idx", background=True))
+    await _swallow("reviews_builder")(db.reviews.create_index("builder_id", name="reviews_builder_idx", background=True))
+    await _swallow("tx_buyer")(db.transactions.create_index("buyer_id", name="tx_buyer_idx", background=True))
+    await _swallow("tx_builder")(db.transactions.create_index("builder_id", name="tx_builder_idx", background=True))
+    await _swallow("login_attempts_ttl")(db.login_attempts.create_index(
+        "updated_at", name="login_attempts_ttl", expireAfterSeconds=900, background=True,
+    ))
+
     logger.info("mongo_indexes_ensured")

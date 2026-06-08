@@ -1,109 +1,141 @@
-# MERGENT — PRD
+# MERGENT — PRD (living tracker)
 
-## Problem statement (verbatim, condensed)
+> **Find. Acquire. Deploy.** — AI-Orchestrated Software Acquisition Ecosystem.
 
-Build MERGENT — an AI-Orchestrated Software Acquisition Ecosystem. Tagline:
-*Find. Acquire. Deploy.*
+This file is the canonical, living tracker. The original Phase 0 + V1.6
+history is preserved below; the top sections reflect current truth.
 
-**Phase 0** (scope of this delivery): the AI spine + API. Prove the
-orchestrator → agents → WS streaming → ranked results pipeline end-to-end
-against a small seeded catalogue. No auth, no UI.
+---
 
-Phase 0 was extended with a Resilience + Observability amendment requiring
-structured logging, provider failover, retry/timeout policy, per-run WS
-isolation, Redis/Mongo reconnect handling, duplicate-embed prevention,
-input validation, health endpoints, and a deterministic ranking invariant.
+## Current Status (as of Phase R)
 
-## Architecture (delivered)
+### Live (real code, real behaviour)
 
-Stack: FastAPI (port 8001) · MongoDB (motor) · Celery + Redis · LiteLLM via
-emergentintegrations · native FastAPI WebSocket · JSON structured logging
-(python-json-logger).
+- **Phase 0 — AI spine**: `Intake → RequirementParser → Embedding →
+  SemanticSearch → ContextCompression → Ranking`, streamed over
+  `/api/ws/match/{run_id}`, structured trace persisted to
+  `orchestration_runs`. Provider chain: openai → anthropic → gemini via the
+  Emergent universal LLM key.
+- **Phase 1 — Auth (JWT)**: register / login / refresh / logout / me /
+  verify-email / forgot-password / reset-password. Bcrypt + Redis-backed
+  refresh-jti registry + Mongo-backed brute-force throttle.
+- **V1.6 — Trust & Quality Agent**: 6-component weighted builder score
+  (uptime + tx success + reviews + response + volume/tenure − disputes),
+  persisted to `builder_profiles.trust_score`, nightly Celery beat at 03:00 UTC.
+- **Phase 6 — Builder Hub**: `/api/me/sales`, `/me/earnings`, `/me/stats`,
+  `/me/overview`, `/builders/{id}/trust`. Web Builder Hub UI wired.
+- **Phase 7 — Notifications, Saved Items, Audit**: in-app + email (debounced)
+  + preferences + one-click unsubscribe; saved items + bulk-exists; per-user
+  and admin audit views.
+- **Marketplace + Solutions + Requirements**: hybrid keyword+vector search,
+  trending, overview, recent requirements, solution CRUD with
+  Celery-embed dispatch.
+- **Messaging**: REST + WS conversations (per-user channel, unread badge).
+- **Transactions / Escrow / Reviews**: state machine `initiated → funded →
+  in_progress → delivered → released → reviewed` with match-integrity
+  enforcement against the originating run's top-1.
+- **Deployments**: per-deployment WS log stream + 7-step FSM with rollback /
+  redeploy actions (simulated infra, real state machine).
+- **Phase R additions** (this iteration): unique-email + TTL + compound
+  indexes on Mongo collections; `/api/admin/*` admin-gated; Redis +
+  celery_worker + celery_beat under supervisor; 3 seed users for testers.
 
-Pipeline: `Intake → RequirementParser → Embedding → SemanticSearch →
-ContextCompression(if needed) → Ranking`.
+### Stubbed / Simulated (works end-to-end but with documented short-circuits)
 
-Embeddings: **local BAAI/bge-base-en-v1.5** (768-dim) via fastembed/ONNX —
-the Emergent universal-key proxy currently does **not** expose OpenAI
-embedding endpoints, only chat. This is a documented Phase 0 compromise
-(see `MIGRATION_NOTES.md`). Cosine similarity is real and exact (numpy).
+- **Stripe checkout** — real call when `STRIPE_API_KEY` is set; otherwise
+  `simulated_checkout: true` flips tx to `funded` immediately
+  (`transactions_routes.py:127-146`). **Phase R: empty key → simulated path.**
+- **Stripe Connect payouts** — not wired. Release credits
+  `builder_profiles.earnings_usd` only. UI shows "payout_provider_status:
+  simulated" (deferred to Phase 10).
+- **Resend email** — real call when `RESEND_API_KEY` is set; otherwise
+  `[SIMULATED] email_send` log + `fallback: true` returned
+  (`services/email.py:188-194`). **Phase R: empty key → simulated path.**
+- **Deployment infrastructure** — the 7-step FSM is `asyncio.sleep`-driven
+  fake log lines. `simulated_infra: true` on every deployment doc.
+- **Forking** — `POST /api/solutions/{id}/fork` is an **HTTP 501 stub**.
+  Validates parent + emits `would_fork` lineage preview; no persistence.
+- **Google OAuth** — only `GET /api/auth/google/status` returning the env
+  flag. No callback, no real flow.
+- **Embeddings** — local `BAAI/bge-base-en-v1.5` via fastembed (the Emergent
+  proxy does not expose embedding endpoints). Real semantic vectors, in-process
+  numpy index, exact cosine.
 
-Catalogue: 10 seeded solutions covering Inventory Management (textile),
-HR, CRM, Project Management, E-commerce.
+### Not started (next phases — see ledger)
 
-## What's been implemented (2026-02 → 2026-06)
+- Master Orchestrator (LLM-driven planner with reflection / replan).
+- Shared agent memory + agent-to-agent bus.
+- Vision Intelligence agents (UI / UX / QA / Security / A11y / Performance).
+- Technical Preview (Request Technical Access, sandbox demo levels).
+- Real Forking with lineage tracking + royalty split.
+- Per-user run history + rerun.
+- Mobile Builder Hub / Saved / Notification Settings parity.
+- MFA / change-password while logged in.
+- OpenAI `text-embedding-3-large` swap.
+- Atlas Vector Search / pgvector migration.
+- WS scaling via Redis Pub/Sub.
 
-* `/app/backend/services/ai_provider.py` — chat + chat_json + embed with
-  provider failover (`AI_PROVIDER_CHAIN`), retry policy, timeouts, token
-  accounting, health snapshot, embed cache.
-* `/app/backend/services/orchestrator.py` — async pipeline; structured
-  per-step records + WS broadcast; concurrency model documented in file
-  header; failure path records `error`, broadcasts `run_failed`.
-  **2026-06: `mark_finished()` now runs BEFORE the terminal broadcast so
-  the WS finally-block can free the channel on subscriber disconnect.**
-* `/app/backend/services/ws_manager.py` — per-`run_id` channels, replay
-  buffer for late subscribers, no cross-talk between runs.
-  **2026-06: added `channel_counts()` introspection method.**
-* `/app/backend/services/vector_index.py` — in-memory L2-normalized matrix
-  with `query()` / `upsert()` / `rebuild()`.
-* `/app/backend/agents/*.py` — Intake, Parser, Embedding, SemanticSearch,
-  ContextCompression (threshold 2000 tokens — 2026-06 tuning so compression
-  reliably engages on substantive inputs), Ranking.
-* `/app/backend/celery_app.py` + `tasks.py` — `embed_solution`,
-  `reindex_all_solutions`, Redis SETNX lock for duplicate prevention.
-* `/app/backend/server.py` — `/api/match`, `/api/match/{run_id}`,
-  `/api/match/{run_id}/trace`, `/api/ws/match/{run_id}`, `/api/health`,
-  `/api/admin/providers/health`, `/api/admin/orchestration/runs`,
-  `/api/admin/orchestration/_debug` (added 2026-06 for WS introspection),
-  `/api/admin/solutions/reindex`, `/api/openapi.json`. Input validation:
-  empty/whitespace/<5/>8000/non-string all rejected with proper codes.
-  WS disconnect finally now calls `cleanup()` so channels free on close.
-* `/app/backend/scripts/seed_phase0.py` — idempotent 10-solution seed.
-* `/app/backend/scripts/consistency_check.py` — 5/5 textile invariant (PASS).
-* `/app/backend/scripts/concurrency_check.py` — 5 parallel runs (PASS).
-* `/app/backend/scripts/failover_check.py` — anthropic→openai fallback (PASS).
-* `/app/backend/scripts/celery_resilience_check.py` — kill+restart worker,
-  jobs recover (PASS).
-* `/app/backend/tests/backend_test.py` — 17 baseline pytests (PASS).
-* `/app/backend/tests/test_scenarios.py` — 12 scenario pytests covering
-  all user-mandated 12 scenarios including hard ContextCompression engagement
-  assertion and WS channel-cleanup assertion (PASS).
-* Supervisor configs added for `redis` and `celery_worker`.
-* `/app/backend/README.md` and `/app/backend/MIGRATION_NOTES.md`.
+---
 
-## Phase 1 unlock gates — status (formally validated 2026-06)
+## Phase Ledger
 
-| Gate                                                            | Status |
-| --------------------------------------------------------------- | ------ |
-| HG1 Semantic relevance consistency (TextileFlow top-3, 5/5)     | ✅ PASS |
-| HG2 Streaming integrity / no cross-talk under concurrency       | ✅ PASS |
-| HG3 Provider abstraction reliability (anthropic→openai)         | ✅ PASS |
-| HG4 Trace completeness/correctness                              | ✅ PASS |
-| Ranking p95 < 30s                                               | ✅ 9.2s |
-| Compression engagement on long inputs (compressed=True visible) | ✅ PASS |
-| WS channel cleanup returns to baseline after disconnect         | ✅ PASS |
-| Concurrent run isolation (5 parallel, varied payloads)          | ✅ PASS |
+| Phase | Goal                                                       | Status      |
+| ----- | ---------------------------------------------------------- | ----------- |
+| 0     | AI spine + API, structured tracing, provider failover      | done        |
+| 1     | JWT auth, profiles, marketplace, solutions, requirements   | done        |
+| 6     | Builder Hub + Trust & Quality Agent (V1.6)                 | done        |
+| 7     | Notifications + Saved Items + Audit                        | done        |
+| 9     | Forking (real) — lineage primitives migrated, route stub   | 501 stub    |
+| 10    | Stripe Connect real payouts                                | not started |
+| R     | Restoration & Hardening: env + indexes + admin auth + seed | in-progress |
+| A     | Decide & deliver: ONE of {Real Forking, Tech Preview, Run history} | planned |
+| B     | Master Orchestrator scaffold + reflection loop (1 agent)   | planned     |
+| C     | Vision Intelligence agents (UI/UX/Security/A11y/Perf)      | planned     |
+| D     | Production swaps: OpenAI embeddings, Atlas Vector, Redis Pub/Sub, real Stripe Connect | planned |
 
-Full report: `/app/test_reports/iteration_3.json` (29/29 backend tests PASS).
+---
 
-## Prioritized backlog (P0/P1/P2 — for Phase 1+)
+## Open Decisions (to confirm with user)
 
-* **P0** Phase 1 UI: requirement input → live trace stream →
-  ranked results grid with explanations.
-* **P0** Add auth (JWT-based custom auth OR Emergent Google login) on the
-  `/api/admin/*` endpoints (currently unauthenticated, marked TODO).
-* **P0** Replace local embeddings with OpenAI `text-embedding-3-large`
-  once an embedding-capable key is available (or move to Atlas vector search).
-* **P1** Builder/seller-side onboarding and a write-side API to add
-  solutions to the catalogue.
-* **P1** Per-user run history with filtering and rerun.
-* **P1** Stripe-based marketplace transaction flow (acquire).
-* **P1** Messaging / deployment workflow per V1 consolidated build directive.
-* **P2** Atlas Vector Search migration (drop the in-memory numpy matrix).
-* **P2** WS scaling via Redis Pub/Sub (for multi-replica deploy).
-* **P2** Postgres + pgvector option (covered in MIGRATION_NOTES).
+1. **Embeddings stay local** for now (BAAI/bge-base-en-v1.5). Swap to OpenAI
+   `text-embedding-3-large` is gated on the Emergent universal key exposing an
+   embedding endpoint OR a separate real OpenAI key being provided. Phase D.
+2. **Real Stripe + real Resend** stay deferred. Both fall back to clean
+   simulated paths when keys are missing. No customer money or email is sent
+   in Phase R.
+3. **MFA + change-password (logged-in)** deferred until after Phase A.
+4. **Mobile parity gaps** — Builder Hub, Saved, NotificationSettings have no
+   mobile screens. Decision needed: build mobile parity or de-scope Builder
+   workflows from mobile?
+5. **Next big move (Phase A)** — user picks ONE of:
+   - **A1**: Implement real Forking (replace 501 stub, persist lineage, fork-tree UI)
+   - **A2**: Build Technical Preview (Request Technical Access + sandbox demo levels)
+   - **A3**: Add per-user Run history + filter + rerun (the most-cited PRD P1)
 
-## Acceptance criteria — final status
+---
+
+## Phase R — What changed (this iteration)
+
+- `/app/backend/requirements.txt`: added `resend==2.4.0`.
+- `/app/backend/.env`, `/app/frontend/.env`, `/app/mobile/.env`: restored.
+- `/app/backend/server.py`: imported `auth.require_role`, gated
+  `POST /api/admin/solutions/reindex`, `GET /api/admin/orchestration/_debug`,
+  `GET /api/admin/providers/health`, `GET /api/admin/orchestration/runs`.
+- `/app/backend/db.py::ensure_indexes()`: added unique-email,
+  TTL (email/password reset/login_attempts), compound (messages,
+  notifications, saved_items), and per-FK indexes (reviews, transactions,
+  conversations).
+- `/etc/supervisor/conf.d/supervisord_phase_r.conf`: added programs
+  `redis`, `celery_worker`, `celery_beat`.
+- `/app/backend/scripts/seed_users.py`: new idempotent seed for 3 test
+  accounts (buyer/builder/admin) + matching profile rows.
+- `/app/memory/test_credentials.md`: created with credentials and Playwright
+  / curl auth-injection examples.
+- `/app/test_result.md`: created with Phase R acceptance criteria.
+
+---
+
+## Acceptance Criteria — Phase 0 (kept for history, all ✅)
 
 | Criterion                                                         | Status |
 | ----------------------------------------------------------------- | ------ |
@@ -114,7 +146,7 @@ Full report: `/app/test_reports/iteration_3.json` (29/29 backend tests PASS).
 | E — AI_PROVIDER=anthropic completes the same query                | ✅      |
 | F — /api/openapi.json valid OpenAPI 3                             | ✅ 8 paths |
 | G — Celery logs show embed_solution per seeded solution           | ✅      |
-| Structured trace per step (logging amendment)                     | ✅      |
+| Structured trace per step                                         | ✅      |
 | Provider failover with fallback_event                             | ✅      |
 | 5 concurrent runs without WS cross-talk                           | ✅      |
 | Mongo + Redis reconnect resilience                                | ✅      |
@@ -123,39 +155,13 @@ Full report: `/app/test_reports/iteration_3.json` (29/29 backend tests PASS).
 | ContextCompression engages on long input + preserves keywords     | ✅      |
 | WS channels freed on subscriber disconnect (no leak)              | ✅      |
 
-## Canonical trace excerpt (2026-06, post-fix)
+## Known compromises (documented)
 
-```
-=== CANONICAL TEXTILE TRACE ===
-status: completed | total_ms: 7588 | tokens: 3360
-providers: ['openai:gpt-4o-mini', 'local:BAAI/bge-base-en-v1.5']
-fallback_count: 0 | retry_count: 0
-
-Steps (agent | status | execution_ms | provider_used):
-  IntakeAgent              | completed |    0ms | -
-  RequirementParserAgent   | completed | 1207ms | openai:gpt-4o-mini
-  EmbeddingAgent           | completed |    0ms | local:BAAI/bge-base-en-v1.5
-  SemanticSearchAgent      | completed |    1ms | -
-  ContextCompressionAgent  | completed |    0ms | -
-  RankingAgent             | completed | 6372ms | openai:gpt-4o-mini
-      top: 1923bfa7-... (TextileFlow ERP)    score=95 conf=high
-      top: ad7f3bc9-... (FabricPulse Inv.)   score=80 conf=medium
-      top: fadb8ea0-... (StockMaster Plus)   score=70 conf=medium
-```
-
-## Known compromises
-
-1. **Embeddings are local (BAAI/bge-base-en-v1.5)**, not OpenAI
-   `text-embedding-3-large`. The Emergent universal-key proxy did not expose
-   any embedding model at build time. The architecture is provider-agnostic;
-   a one-line swap restores OpenAI when an embedding-capable key is supplied.
-   Real semantic search, not mocked vectors. See `MIGRATION_NOTES.md`.
-
-2. **Vector index is in-process numpy**, not Atlas Vector Search (local
-   Mongo doesn't support `$vectorSearch`). Exact cosine, sub-second at
-   N=10⁴; documented migration path to Atlas / pgvector.
-
+1. **Embeddings are local** (`BAAI/bge-base-en-v1.5`), not OpenAI
+   `text-embedding-3-large`. The Emergent proxy did not expose any embedding
+   model at build time. Real cosine similarity, not mocked. See
+   `MIGRATION_NOTES.md`.
+2. **Vector index is in-process numpy** — sub-second at N=10⁴, documented
+   migration path to Atlas / pgvector.
 3. **WS channels persist until at least one subscriber connects+disconnects.**
-   A run with zero WS subscribers will leave a buffered channel in memory.
-   Phase 0 acceptable; Phase 1 should add a finished+empty TTL sweep if
-   this becomes a footprint concern.
+   Acceptable for Phase 0; a finished+empty TTL sweep is on the Phase D list.
